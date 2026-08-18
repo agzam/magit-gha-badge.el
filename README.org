@@ -1,0 +1,41 @@
+* magit-gha-badge
+
+A README-style GitHub Actions status badge in the magit status buffer.
+
+#+begin_example
+Checks   🟢 CI 0ecbb23
+#+end_example
+
+One line at the top of =magit-status=, fetched asynchronously from the GitHub API (via [[https://github.com/magit/ghub][ghub]]) on every status refresh - the refresh never waits on the network. =RET= or =mouse-1= on the badge opens the exact workflow run page; =M-x magit-gha-badge-browse-run= does the same from any buffer in the repo. No steady-state timers: a bounded poll (=magit-gha-badge-poll-interval=, 30s) runs only while a run is pending and the status buffer stays displayed, then dies.
+
+Glyphs: 🟣 queued · 🟡 in progress · 🟢 success · 🔴 failure · ⚪ cancelled/skipped · 🟠 action required. A branch with no runs shows nothing.
+
+** Install
+
+Not on MELPA (yet). With elpaca:
+
+#+begin_src emacs-lisp
+(use-package magit-gha-badge
+  :ensure (magit-gha-badge :host github :repo "agzam/magit-gha-badge.el")
+  :defer t
+  :init
+  (with-eval-after-load 'magit
+    (magit-add-section-hook 'magit-status-sections-hook
+                            #'magit-gha-badge-insert
+                            'magit-insert-status-headers
+                            'append)))
+#+end_src
+
+** Auth
+
+Requests go through =ghub-request= with =magit-gha-badge-auth= (default =ghub=, the generic ghub token): an authinfo entry like
+
+#+begin_example
+machine api.github.com login USER^ghub password TOKEN
+#+end_example
+
+plus =github.user= set in git config. If you already use forge, you have the stack working; see ghub's manual for token setup.
+
+** Freshness
+
+The badge asks GitHub for the latest run on the current branch at fetch time, so it is correct no matter who pushed - magit, a script, another machine. The only staleness is "badge shows the previous truth until the next refresh"; magit refreshes status after its own commands, so magit-initiated pushes update it for free.

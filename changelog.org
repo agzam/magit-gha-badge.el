@@ -1,0 +1,2 @@
+* 0.1.0
+- Initial release: badge section in magit-status, async ghub fetch, bounded pending-poll, =magit-gha-badge-browse-run=.
