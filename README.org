@@ -1,5 +1,7 @@
 * magit-gha-badge
 
+[[https://github.com/agzam/magit-gha-badge.el/actions/workflows/run-tests.yml][https://github.com/agzam/magit-gha-badge.el/actions/workflows/run-tests.yml/badge.svg]]
+
 A README-style GitHub Actions status badge in the magit status buffer.
 
 #+begin_example
