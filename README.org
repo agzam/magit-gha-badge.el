@@ -8,9 +8,19 @@ A README-style GitHub Actions status badge in the magit status buffer.
 Checks   🟢 CI 0ecbb23
 #+end_example
 
-One line at the top of =magit-status=, fetched asynchronously from the GitHub API (via [[https://github.com/magit/ghub][ghub]]) on every status refresh - the refresh never waits on the network. =RET= or =mouse-1= on the badge opens the exact workflow run page; =M-x magit-gha-badge-browse-run= does the same from any buffer in the repo. No steady-state timers: a bounded poll (=magit-gha-badge-poll-interval=, 30s) runs only while a run is pending and the status buffer stays displayed, then dies.
+One line at the top of =magit-status=, fetched asynchronously from the GitHub API (via [[https://github.com/magit/ghub][ghub]]) on every status refresh - the refresh never waits on the network. =RET= or =mouse-1= on the badge opens the newest workflow run page; =M-x magit-gha-badge-browse-run= does the same from any buffer in the repo. Both refetch before they open anything, so a run that started after the last refresh is the one you land on. No steady-state timers: a bounded poll (=magit-gha-badge-poll-interval=, 30s) runs only while a run is pending and the status buffer stays displayed, then dies.
 
 Glyphs: 🟣 queued · 🟡 in progress · 🟢 success · 🔴 failure · ⚪ cancelled/skipped · 🟠 action required. A branch with no runs shows nothing.
+
+** Forks
+
+Work on a fork usually runs nowhere in the fork: GitHub keeps Actions off in forks by default, and the checks of a pull request run in the upstream repo. So for a fork the badge asks the upstream repo too, and shows whose run it found:
+
+#+begin_example
+Checks   🟠 Lint 1479d25 (cli/cli)
+#+end_example
+
+Only runs whose head repo is your fork count, so a branch that shares its name with one of the upstream's own (=main=, =master=) does not pick up somebody else's run.
 
 ** Install
 
@@ -40,4 +50,10 @@ plus =github.user= set in git config. If you already use forge, you have the sta
 
 ** Freshness
 
-The badge asks GitHub for the latest run on the current branch at fetch time, so it is correct no matter who pushed - magit, a script, another machine. The only staleness is "badge shows the previous truth until the next refresh"; magit refreshes status after its own commands, so magit-initiated pushes update it for free.
+The badge asks GitHub for the latest run on the current branch at fetch time, so it is correct no matter who pushed - magit, a script, another machine.
+
+A push is the one case where the answer lags. GitHub creates the run seconds after the push lands, so the refresh magit does right after a push still gets the previous run. A trailing ellipsis marks that - the run on the badge is older than the commit you pushed - and the badge polls up to three more times for the new run to appear:
+
+#+begin_example
+Checks   🟢 CI 0ecbb23 ⋯
+#+end_example

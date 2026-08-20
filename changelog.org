@@ -1,2 +1,7 @@
+* 0.2.0
+- Find the runs of a pull request from a fork: the upstream repo is asked as well, narrowed to runs whose head repo is the fork, and the badge names the repo a run happened in when it is not the one the branch pushes to.
+- =magit-gha-badge-browse-run= (and =RET= on the badge) refetches before it opens anything, instead of opening the run the badge happens to hold.
+- Keep polling while a pushed commit has no run yet, bounded to three fetches, and mark the stale badge with a trailing ellipsis.
+
 * 0.1.0
 - Initial release: badge section in magit-status, async ghub fetch, bounded pending-poll, =magit-gha-badge-browse-run=.

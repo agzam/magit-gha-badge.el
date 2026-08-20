@@ -38,10 +38,13 @@ lint: $(ELPA_DIR)
 	--eval "(require 'package-lint)" \
 	-f package-lint-batch-and-exit magit-gha-badge.el
 
+# the .elc is dropped again: `load' prefers it over a newer .el, so a
+# leftover would have `make test' run yesterday's code
 check-compile: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(setq byte-compile-error-on-warn t)" \
 	--eval "(unless (byte-compile-file \"magit-gha-badge.el\") (kill-emacs 1))"
+	rm -f magit-gha-badge.elc
 
 clean:
 	rm -f *.elc test/*.elc
