@@ -5,7 +5,7 @@
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: August 18, 2026
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Keywords: vc tools
 ;; Homepage: https://github.com/agzam/magit-gha-badge.el
 ;; Package-Requires: ((emacs "29.1") (magit "4.0.0") (ghub "4.0.0"))
@@ -203,14 +203,23 @@ else's run has to say whose it is."
          (not (magit-gha-badge--same-slug-p repo slug))
          repo)))
 
+(defun magit-gha-badge--age (created)
+  "Return CREATED, an API timestamp, as a phrase like \"3 days ago\".
+Nil without a timestamp.  The units are magit's own, the ones its log
+margin counts commit ages in."
+  (when created
+    (pcase-let ((`(,count ,unit) (magit--age (float-time (date-to-time created)))))
+      (format "%s %s ago" count unit))))
+
 (defun magit-gha-badge--badge (state)
-  "Return glyph + workflow + short sha for STATE, nil when nothing to show.
+  "Return glyph + workflow + short sha + age for STATE, nil when nothing to show.
 The run's repo follows the sha when the run did not happen in the repo
-the branch is pushed to.  A trailing ellipsis marks a run older than the
-pushed commit, whose own run GitHub has yet to create.  Nil for a cached
-no-runs branch, and for a fetch failure with no previously fetched truth
-to keep showing.  No result at all renders a placeholder, so a cold
-status buffer shows the fetch is underway."
+the branch is pushed to, and how long ago the run started follows that.
+A trailing ellipsis marks a run older than the pushed commit, whose own
+run GitHub has yet to create.  Nil for a cached no-runs branch, and for
+a fetch failure with no previously fetched truth to keep showing.  No
+result at all renders a placeholder, so a cold status buffer shows the
+fetch is underway."
   (let ((sha (plist-get state :sha)))
     (cond
      ((plist-get state :status)
@@ -221,6 +230,9 @@ status buffer shows the fetch is underway."
                        (and sha (substring sha 0 (min 7 (length sha))))
                        (when-let* ((foreign (magit-gha-badge--foreign-repo state)))
                          (format "(%s)" foreign))
+                       (when-let* ((age (magit-gha-badge--age
+                                         (plist-get state :created))))
+                         (concat "- " age))
                        (and (magit-gha-badge--waiting-p state) "⋯")))
        " "))
      ((plist-get state :error) nil)

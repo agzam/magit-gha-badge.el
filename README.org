@@ -12,12 +12,14 @@ One line at the top of =magit-status=, fetched asynchronously from the GitHub AP
 
 Glyphs: 🟣 queued · 🟡 in progress · 🟢 success · 🔴 failure · ⚪ cancelled/skipped · 🟠 action required. A branch with no runs shows nothing.
 
+The age is when the run started, counted in magit's own units - the ones the log margin uses. It is as fresh as the line: a status buffer left open says what it said at the last refresh.
+
 ** Forks
 
 Work on a fork usually runs nowhere in the fork: GitHub keeps Actions off in forks by default, and the checks of a pull request run in the upstream repo. So for a fork the badge asks the upstream repo too, and shows whose run it found:
 
 #+begin_example
-Checks   🟠 Lint 1479d25 (cli/cli)
+Checks   🟠 Lint 1479d25 (cli/cli) - 2 hours ago
 #+end_example
 
 Only runs whose head repo is your fork count, so a branch that shares its name with one of the upstream's own (=main=, =master=) does not pick up somebody else's run.
@@ -55,5 +57,5 @@ The badge asks GitHub for the latest run on the current branch at fetch time, so
 A push is the one case where the answer lags. GitHub creates the run seconds after the push lands, so the refresh magit does right after a push still gets the previous run. A trailing ellipsis marks that - the run on the badge is older than the commit you pushed - and the badge polls up to three more times for the new run to appear:
 
 #+begin_example
-Checks   🟢 CI 0ecbb23 ⋯
+Checks   🟢 CI 0ecbb23 - 3 days ago ⋯
 #+end_example
