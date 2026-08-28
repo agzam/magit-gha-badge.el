@@ -68,6 +68,13 @@ ARGS carries the `ghub-request' keywords, of which the callbacks are used."
   "Return the params RESOURCE was requested with."
   (cdr (assoc resource magit-gha-badge-tests--calls)))
 
+(defun magit-gha-badge-tests--ago (seconds)
+  "Return an API-shaped timestamp SECONDS before now.
+Now is truncated to the whole second, so the age an expectation sees is
+SECONDS plus a sub-second remainder: only offsets of a minute and up
+round to a stable count."
+  (format-time-string "%FT%TZ" (- (time-convert nil 'integer) seconds) t))
+
 (describe "magit-gha-badge--slug"
   (it "parses ssh remotes"
     (expect (magit-gha-badge--slug "git@github.com:agzam/.emacs.d.git")
@@ -290,6 +297,23 @@ ARGS carries the `ghub-request' keywords, of which the callbacks are used."
   (it "stays quiet before a fetch settled the slug"
     (expect (magit-gha-badge--foreign-repo '(:repo "cli/cli")) :to-be nil)))
 
+(describe "magit-gha-badge--age"
+  (it "counts in the largest unit that fits"
+    (expect (magit-gha-badge--age (magit-gha-badge-tests--ago 300))
+            :to-equal "5 minutes ago")
+    (expect (magit-gha-badge--age (magit-gha-badge-tests--ago (* 3 24 60 60)))
+            :to-equal "3 days ago")
+    (expect (magit-gha-badge--age (magit-gha-badge-tests--ago (* 5 2629746)))
+            :to-equal "5 months ago"))
+  (it "keeps the unit singular for one of it"
+    (expect (magit-gha-badge--age (magit-gha-badge-tests--ago 3600))
+            :to-equal "1 hour ago"))
+  (it "counts a run that just started in seconds"
+    (expect (magit-gha-badge--age (magit-gha-badge-tests--ago 5))
+            :to-match "\\`[0-9]+ seconds ago\\'"))
+  (it "says nothing without a timestamp"
+    (expect (magit-gha-badge--age nil) :to-be nil)))
+
 (describe "magit-gha-badge--line"
   (it "renders a placeholder before any result arrives"
     (expect (magit-gha-badge--line nil) :to-equal "Checks   ⋯"))
@@ -311,6 +335,17 @@ ARGS carries the `ghub-request' keywords, of which the callbacks are used."
              '(:status "completed" :conclusion "success" :workflow "CI"
                :sha "0ecbb23" :pushed "deadbee"))
             :to-equal "Checks   🟢 CI 0ecbb23 ⋯"))
+  (it "tells how long ago the run started"
+    (expect (magit-gha-badge--line
+             (list :status "completed" :conclusion "success" :workflow "CI"
+                   :sha "0ecbb23" :created (magit-gha-badge-tests--ago 300)))
+            :to-equal "Checks   🟢 CI 0ecbb23 - 5 minutes ago"))
+  (it "puts the age after the repo and before the wait marker"
+    (expect (magit-gha-badge--line
+             (list :status "completed" :conclusion "failure" :workflow "Lint"
+                   :sha "0ecbb23" :repo "cli/cli" :slug "agzam/cli"
+                   :pushed "deadbee" :created (magit-gha-badge-tests--ago 3600)))
+            :to-equal "Checks   🔴 Lint 0ecbb23 (cli/cli) - 1 hour ago ⋯"))
   (it "renders a placeholder while a pushed commit has no run at all"
     (expect (magit-gha-badge--line '(:no-runs t :pushed "deadbee"))
             :to-equal "Checks   ⋯"))
