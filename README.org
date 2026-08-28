@@ -5,7 +5,7 @@
 A README-style GitHub Actions status badge in the magit status buffer.
 
 #+begin_example
-Checks   🟢 CI 0ecbb23
+Checks   🟢 CI 0ecbb23 - 5 minutes ago
 #+end_example
 
 One line at the top of =magit-status=, fetched asynchronously from the GitHub API (via [[https://github.com/magit/ghub][ghub]]) on every status refresh - the refresh never waits on the network. =RET= or =mouse-1= on the badge opens the newest workflow run page; =M-x magit-gha-badge-browse-run= does the same from any buffer in the repo. Both refetch before they open anything, so a run that started after the last refresh is the one you land on. No steady-state timers: a bounded poll (=magit-gha-badge-poll-interval=, 30s) runs only while a run is pending and the status buffer stays displayed, then dies.
