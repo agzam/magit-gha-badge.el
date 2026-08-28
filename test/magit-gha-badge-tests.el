@@ -512,5 +512,4 @@ round to a stable count."
             (expect (plist-get (magit-gha-badge--state repo) :timer) :to-be 'tm))
         (remhash repo magit-gha-badge--cache)))))
 
-(provide 'magit-gha-badge-tests)
 ;;; magit-gha-badge-tests.el ends here

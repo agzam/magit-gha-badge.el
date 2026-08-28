@@ -3,6 +3,7 @@
 ;; Copyright (C) 2026 Ag Ibragimov
 ;;
 ;; Author: Ag Ibragimov <agzam.ibragimov@gmail.com>
+;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: August 18, 2026
 ;; Version: 0.3.0
