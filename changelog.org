@@ -1,3 +1,8 @@
+* 0.4.0
+- A failed fetch says why on the badge line: =Checks   ❗ 401 Bad credentials=, after the last known run when there is one. The tooltip holds the full error, =magit-gha-badge-browse-run= says why too, and the echo area shows each new error once.
+- A missing token, a missing =github.user= or no network no longer stops magit from drawing the rest of the status buffer.
+- A GitHub remote the token cannot read shows its error where it showed nothing. =magit-disable-section-inserter= in =.dir-locals.el= hides the badge for one repo.
+
 * 0.3.0
 - The badge says how long ago the run started: =Checks   🟢 CI 0ecbb23 - 5 minutes ago=.
 
