@@ -1,11 +1,10 @@
 ;;; test/magit-gha-badge-tests.el --- magit-gha-badge specs -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; Pure-function coverage: parsing, glyph mapping, merge/re-arm decisions,
-;; line rendering, cache updates, plus the fan-out over a fork and its
-;; upstream against a faked `ghub-request'.  No network, no live magit
-;; buffers - marker/timer integration is not replica-testable (buffers
-;; without real sections prove nothing).
+;; Parsing, glyph mapping, merge/re-arm decisions, line rendering, cache
+;; updates, the requests against a faked `ghub-request', and the in-place
+;; swap in a buffer of real magit sections.  No network; the poll timer
+;; and the status buffer refresh are verified live.
 
 ;;; Code:
 
@@ -17,7 +16,9 @@
 (defvar magit-gha-badge-tests--payload
   '((total_count . 1)
     (workflow_runs
-     . (((status . "completed")
+     . (((id . 123)
+         (run_attempt . 2)
+         (status . "completed")
          (conclusion . "success")
          (html_url . "https://github.com/agzam/.emacs.d/actions/runs/123")
          (head_sha . "0ecbb23deadbeef0123456789abcdef012345678")
@@ -48,6 +49,52 @@
          (created_at . "2026-08-19T11:00:00Z")
          (repository . ((full_name . "cli/cli")))
          (head_repository . ((full_name . "agzam/cli"))))))))
+
+;; shape of GET /repos/OWNER/REPO/actions/runs/ID/jobs: a job running, one
+;; failed, one passed, and one whose status lags its finished steps
+(defvar magit-gha-badge-tests--jobs-payload
+  '((total_count . 4)
+    (jobs
+     . (((name . "Testing (31.1)")
+         (status . "in_progress")
+         (conclusion . nil)
+         (html_url . "https://github.com/agzam/.emacs.d/actions/runs/123/job/1")
+         (steps . (((name . "Set up job") (status . "completed") (conclusion . "success"))
+                   ((name . "Run tests") (status . "in_progress") (conclusion . nil))
+                   ((name . "Complete job") (status . "pending") (conclusion . nil)))))
+        ((name . "Testing (29.4)")
+         (status . "completed")
+         (conclusion . "failure")
+         (html_url . "https://github.com/agzam/.emacs.d/actions/runs/123/job/2")
+         (steps . (((name . "Set up job") (status . "completed") (conclusion . "success"))
+                   ((name . "Run tests") (status . "completed") (conclusion . "failure"))
+                   ((name . "Check byte-compilation") (status . "completed")
+                    (conclusion . "skipped"))
+                   ((name . "Complete job") (status . "completed") (conclusion . "success")))))
+        ((name . "Lint")
+         (status . "completed")
+         (conclusion . "success")
+         (html_url . "https://github.com/agzam/.emacs.d/actions/runs/123/job/3")
+         (steps . (((name . "Set up job") (status . "completed") (conclusion . "success"))
+                   ((name . "Complete job") (status . "completed") (conclusion . "success")))))
+        ((name . "Docs")
+         (status . "in_progress")
+         (conclusion . nil)
+         (html_url . "https://github.com/agzam/.emacs.d/actions/runs/123/job/4")
+         (steps . (((name . "Set up job") (status . "completed") (conclusion . "success"))
+                   ((name . "Complete job") (status . "completed")
+                    (conclusion . "success")))))))))
+
+(defconst magit-gha-badge-tests--jobs-resource "/repos/agzam/.emacs.d/actions/runs/123/jobs")
+
+(defconst magit-gha-badge-tests--running
+  '(:id 123 :attempt 1 :status "in_progress" :repo "agzam/.emacs.d" :workflow "CI")
+  "A fetch result for a run still going.")
+
+(defconst magit-gha-badge-tests--failed
+  '(:id 123 :attempt 1 :status "completed" :conclusion "failure" :repo "agzam/.emacs.d"
+    :workflow "CI")
+  "A fetch result for a run that failed.")
 
 (defvar magit-gha-badge-tests--answers nil
   "Alist of API resource to the payload the `ghub-request' stub replies with.
@@ -107,6 +154,52 @@ SECONDS plus a sub-second remainder: only offsets of a minute and up
 round to a stable count."
   (format-time-string "%FT%TZ" (- (time-convert nil 'integer) seconds) t))
 
+(defun magit-gha-badge-tests--job (name status &optional conclusion step)
+  "Return a parsed job NAME in STATUS, with CONCLUSION, at STEP."
+  (list :name name :status status :conclusion conclusion :step step
+        :url (concat "https://github.com/agzam/.emacs.d/actions/runs/123/job/" name)))
+
+(defun magit-gha-badge-tests--fetch-jobs (repo result)
+  "Run RESULT through the jobs request for REPO, as a fetch does.
+Merge what it hands on into REPO's state, and return that."
+  (let (handed)
+    (magit-gha-badge--request-jobs repo result (lambda (r) (setq handed r)))
+    (puthash repo (magit-gha-badge--merge-result (magit-gha-badge--state repo) handed)
+             magit-gha-badge--cache)
+    handed))
+
+(defun magit-gha-badge-tests--count (resource)
+  "Return how often RESOURCE was requested."
+  (seq-count (lambda (call) (equal (car call) resource)) magit-gha-badge-tests--calls))
+
+(defun magit-gha-badge-tests--child (type)
+  "Return the top-level section of TYPE in the current buffer."
+  (seq-find (lambda (section) (eq (oref section type) type))
+            (oref magit-root-section children)))
+
+(defun magit-gha-badge-tests--render (state &optional first)
+  "Insert STATE's badge section between two others in a new buffer.
+FIRST leaves out the one before, as magit does when no header has
+anything to show.  Return STATE with the section and the buffer, as the
+inserter records them."
+  (let ((buffer (generate-new-buffer " *magit-gha-badge-tests*")))
+    (with-current-buffer buffer
+      (magit-section-mode)
+      (let ((inhibit-read-only t))
+        (magit-insert-section (root)
+          (unless first
+            (magit-insert-section (head)
+              (insert "Head:     main Fix parser crash\n"))
+            (insert "\n"))
+          (magit-insert-section (gha-badge (plist-get state :url))
+            (magit-insert-heading (magit-gha-badge--line state))
+            (insert (magit-gha-badge--body state)))
+          (magit-insert-section (untracked)
+            (magit-insert-heading "Untracked files")
+            (insert "notes.txt\n"))))
+      (append (list :section (magit-gha-badge-tests--child 'gha-badge) :buffer buffer)
+              state))))
+
 (describe "magit-gha-badge--slug"
   (it "parses ssh remotes"
     (expect (magit-gha-badge--slug "git@github.com:agzam/.emacs.d.git")
@@ -127,6 +220,8 @@ round to a stable count."
 (describe "magit-gha-badge--parse-payload"
   (it "maps a completed run's fields"
     (let ((result (magit-gha-badge--parse-payload magit-gha-badge-tests--payload)))
+      (expect (plist-get result :id) :to-equal 123)
+      (expect (plist-get result :attempt) :to-equal 2)
       (expect (plist-get result :status) :to-equal "completed")
       (expect (plist-get result :conclusion) :to-equal "success")
       (expect (plist-get result :url)
@@ -166,6 +261,26 @@ round to a stable count."
             :to-equal '(:error "Not Found"))
     (expect (magit-gha-badge--parse-payload nil)
             :to-equal '(:error "Unexpected response from GitHub"))))
+
+(describe "magit-gha-badge--parse-jobs"
+  (it "names the step a running job is in"
+    (expect (nth 0 (magit-gha-badge--parse-jobs magit-gha-badge-tests--jobs-payload))
+            :to-equal '(:name "Testing (31.1)" :status "in_progress" :conclusion nil
+                        :step "Run tests"
+                        :url "https://github.com/agzam/.emacs.d/actions/runs/123/job/1")))
+  (it "names the step a failed job failed at"
+    (let ((job (nth 1 (magit-gha-badge--parse-jobs magit-gha-badge-tests--jobs-payload))))
+      (expect (plist-get job :conclusion) :to-equal "failure")
+      (expect (plist-get job :step) :to-equal "Run tests")))
+  (it "names no step for a job that passed"
+    (expect (plist-get (nth 2 (magit-gha-badge--parse-jobs
+                               magit-gha-badge-tests--jobs-payload))
+                       :step)
+            :to-be nil))
+  (it "names no step for a running job whose steps have all finished"
+    (let ((job (nth 3 (magit-gha-badge--parse-jobs magit-gha-badge-tests--jobs-payload))))
+      (expect (plist-get job :status) :to-equal "in_progress")
+      (expect (plist-get job :step) :to-be nil))))
 
 (describe "magit-gha-badge--error-message"
   (it "turns an HTTP error into its code and GitHub's message, docs on line 2"
@@ -302,6 +417,14 @@ round to a stable count."
       (expect (plist-get merged :url) :to-equal "u")
       (expect (plist-get merged :error) :to-be nil)
       (expect (plist-get merged :no-runs) :to-be nil)))
+  (it "drops the jobs of the previous run with it"
+    (let ((merged (magit-gha-badge--merge-result
+                   (list :status "completed" :conclusion "failure" :id 123 :attempt 1
+                         :jobs (list (magit-gha-badge-tests--job "Test" "completed" "failure"))
+                         :jobs-run '(123 . 1))
+                   '(:status "completed" :conclusion "success" :id 124 :attempt 1))))
+      (expect (plist-get merged :jobs) :to-be nil)
+      (expect (plist-get merged :jobs-run) :to-be nil)))
   (it "preserves bookkeeping fields"
     (let ((merged (magit-gha-badge--merge-result
                    '(:timer tm :section sec :buffer buf :fetching now
@@ -429,6 +552,62 @@ round to a stable count."
     (expect (magit-gha-badge--line '(:error t))
             :to-equal "Checks   ❗ Fetching workflow runs failed")))
 
+(describe "magit-gha-badge--job-lines"
+  (it "lists failed jobs, then running ones, each in GitHub's order, under the glyph"
+    (expect (magit-gha-badge--job-lines
+             (list (magit-gha-badge-tests--job "a" "in_progress" nil "Build")
+                   (magit-gha-badge-tests--job "b" "completed" "failure" "Test")
+                   (magit-gha-badge-tests--job "c" "in_progress" nil "Lint")
+                   (magit-gha-badge-tests--job "d" "completed" "timed_out" "Test")))
+            :to-equal '("         🔴 b - Test"
+                        "         🔴 d - Test"
+                        "         🟡 a - Build"
+                        "         🟡 c - Lint")))
+  (it "hides jobs that neither run nor failed"
+    (expect (magit-gha-badge--job-lines
+             (list (magit-gha-badge-tests--job "passed" "completed" "success")
+                   (magit-gha-badge-tests--job "stopped" "completed" "cancelled")
+                   (magit-gha-badge-tests--job "skipped" "completed" "skipped")
+                   (magit-gha-badge-tests--job "next" "queued")
+                   (magit-gha-badge-tests--job "gated" "waiting")))
+            :to-be nil))
+  (it "pads job names to the longest one shown, and leaves a job without a step bare"
+    (expect (magit-gha-badge--job-lines
+             (list (magit-gha-badge-tests--job "Testing (29.4)" "in_progress" nil "Run tests")
+                   (magit-gha-badge-tests--job "Lint" "in_progress" nil "Check")
+                   (magit-gha-badge-tests--job "Docs" "in_progress")))
+            :to-equal '("         🟡 Testing (29.4) - Run tests"
+                        "         🟡 Lint           - Check"
+                        "         🟡 Docs")))
+  (it "lines the steps up by display width when a name holds an emoji"
+    (expect (seq-uniq
+             (mapcar (lambda (line)
+                       (string-width (substring line 0 (string-search " - " line))))
+                     (magit-gha-badge--job-lines
+                      (list (magit-gha-badge-tests--job "🧪 Tests" "in_progress" nil "Run")
+                            (magit-gha-badge-tests--job "Lint" "in_progress" nil "Check")))))
+            :to-equal (list (string-width "         🟡 🧪 Tests"))))
+  (it "shows five jobs, and past five shows four and counts the rest"
+    (let ((jobs (mapcar (lambda (n)
+                          (magit-gha-badge-tests--job (format "job %s" n) "in_progress"
+                                                      nil "Run"))
+                        (number-sequence 1 7))))
+      (expect (length (magit-gha-badge--job-lines (seq-take jobs 5))) :to-equal 5)
+      (expect (magit-gha-badge--job-lines jobs)
+              :to-equal '("         🟡 job 1 - Run"
+                          "         🟡 job 2 - Run"
+                          "         🟡 job 3 - Run"
+                          "         🟡 job 4 - Run"
+                          "         +3 more"))))
+  (it "carries the job's page on its line, and none on the count"
+    (let ((lines (magit-gha-badge--job-lines
+                  (mapcar (lambda (n)
+                            (magit-gha-badge-tests--job (format "job%s" n) "in_progress"))
+                          (number-sequence 1 6)))))
+      (expect (get-text-property 3 'magit-gha-badge-url (car lines))
+              :to-equal "https://github.com/agzam/.emacs.d/actions/runs/123/job/job1")
+      (expect (get-text-property 3 'magit-gha-badge-url (car (last lines))) :to-be nil))))
+
 (describe "magit-gha-badge--browse-target"
   (it "opens the fetched run without a word"
     (let ((target (magit-gha-badge--browse-target
@@ -541,6 +720,67 @@ round to a stable count."
         (funcall errorback magit-gha-badge-tests--not-found))
       (expect (plist-get result :error)
               :to-equal "404 Not Found\nhttps://docs.github.com/rest"))))
+
+(describe "magit-gha-badge--request-jobs"
+  :var (repo)
+  (before-each
+    (setq repo "/tmp/magit-gha-badge-test-repo/"
+          magit-gha-badge-tests--calls nil
+          magit-gha-badge-tests--answers
+          (list (cons magit-gha-badge-tests--jobs-resource
+                      magit-gha-badge-tests--jobs-payload)))
+    (spy-on 'ghub-request :and-call-fake #'magit-gha-badge-tests--ghub))
+  (after-each
+    (remhash repo magit-gha-badge--cache))
+
+  (it "asks for the jobs of the latest attempt on every fetch while the run is going"
+    (let ((result (magit-gha-badge-tests--fetch-jobs repo magit-gha-badge-tests--running)))
+      (magit-gha-badge-tests--fetch-jobs repo magit-gha-badge-tests--running)
+      (expect (magit-gha-badge-tests--count magit-gha-badge-tests--jobs-resource)
+              :to-equal 2)
+      (expect (magit-gha-badge-tests--params magit-gha-badge-tests--jobs-resource)
+              :to-equal '((filter . "latest") (per_page . "100")))
+      (expect (plist-get result :jobs)
+              :to-equal (magit-gha-badge--parse-jobs magit-gha-badge-tests--jobs-payload))))
+
+  (it "asks for the jobs of a failed run once per attempt"
+    (magit-gha-badge-tests--fetch-jobs repo magit-gha-badge-tests--failed)
+    (let ((result (magit-gha-badge-tests--fetch-jobs repo magit-gha-badge-tests--failed)))
+      (expect (magit-gha-badge-tests--count magit-gha-badge-tests--jobs-resource)
+              :to-equal 1)
+      (expect (length (plist-get result :jobs)) :to-equal 4))
+    (magit-gha-badge-tests--fetch-jobs repo (append '(:attempt 2)
+                                                    magit-gha-badge-tests--failed))
+    (expect (magit-gha-badge-tests--count magit-gha-badge-tests--jobs-resource)
+            :to-equal 2))
+
+  (it "asks again once a run it watched going has failed"
+    (magit-gha-badge-tests--fetch-jobs repo magit-gha-badge-tests--running)
+    (magit-gha-badge-tests--fetch-jobs repo magit-gha-badge-tests--failed)
+    (expect (magit-gha-badge-tests--count magit-gha-badge-tests--jobs-resource)
+            :to-equal 2))
+
+  (it "never asks for the jobs of a run that passed"
+    (let ((result (magit-gha-badge-tests--fetch-jobs
+                   repo '(:id 123 :attempt 1 :status "completed" :conclusion "success"
+                          :repo "agzam/.emacs.d"))))
+      (expect magit-gha-badge-tests--calls :to-be nil)
+      (expect (plist-get result :jobs) :to-be nil)))
+
+  (it "asks the repo the run happened in, the upstream for a fork"
+    (magit-gha-badge-tests--fetch-jobs repo (append '(:repo "cli/cli")
+                                                    magit-gha-badge-tests--running))
+    (expect (caar magit-gha-badge-tests--calls)
+            :to-equal "/repos/cli/cli/actions/runs/123/jobs"))
+
+  (it "hands the run on without jobs or an error when the request fails, then asks again"
+    (let ((magit-gha-badge-tests--answers nil))
+      (let ((result (magit-gha-badge-tests--fetch-jobs repo magit-gha-badge-tests--failed)))
+        (expect (plist-get result :workflow) :to-equal "CI")
+        (expect (plist-get result :jobs) :to-be nil)
+        (expect (plist-get result :error) :to-be nil))
+      (magit-gha-badge-tests--fetch-jobs repo magit-gha-badge-tests--failed)
+      (expect (length magit-gha-badge-tests--calls) :to-equal 2))))
 
 (describe "magit-gha-badge--parent-slug"
   (before-each
@@ -672,7 +912,100 @@ round to a stable count."
                                        (lambda (state) (push state states)))
             (expect (spy-calls-count 'message) :to-equal 0)
             (expect (plist-get (car states) :error) :to-equal "401 Bad credentials"))
+        (remhash repo magit-gha-badge--cache))))
+
+  (it "removes the badge, newline and all, when the answer leaves nothing to show"
+    (let* ((repo "/tmp/magit-gha-badge-test-repo/")
+           (state (magit-gha-badge-tests--render nil)))
+      (unwind-protect
+          (progn
+            (puthash repo state magit-gha-badge--cache)
+            (magit-gha-badge--on-fetch repo '(:no-runs t))
+            (expect (with-current-buffer (plist-get state :buffer) (buffer-string))
+                    :to-equal "Head:     main Fix parser crash\n\nUntracked files\nnotes.txt\n")
+            ;; no text left to swap into: a later run comes back by a refresh
+            (expect (plist-get (magit-gha-badge--state repo) :section) :to-be nil))
+        (kill-buffer (plist-get state :buffer))
         (remhash repo magit-gha-badge--cache)))))
+
+(describe "magit-gha-badge--swap"
+  (it "replaces the badge and its job lines, and keeps the sections around it"
+    (let* ((state (magit-gha-badge-tests--render
+                   (list :status "in_progress" :workflow "CI" :sha "0ecbb23"
+                         :jobs (list (magit-gha-badge-tests--job "Lint" "in_progress" nil "Check")
+                                     (magit-gha-badge-tests--job "Test" "in_progress" nil
+                                                                 "Run tests")))))
+           (section (plist-get state :section)))
+      (unwind-protect
+          (with-current-buffer (plist-get state :buffer)
+            (magit-gha-badge--swap
+             (append (list :status "completed" :conclusion "failure"
+                           :jobs (list (magit-gha-badge-tests--job "Test" "completed" "failure"
+                                                                   "Run tests")))
+                     state))
+            (expect (buffer-string)
+                    :to-equal (concat "Head:     main Fix parser crash\n\n"
+                                      "Checks   🔴 CI 0ecbb23\n"
+                                      "         🔴 Test - Run tests\n"
+                                      "Untracked files\nnotes.txt\n"))
+            (expect (buffer-substring (oref section content) (oref section end))
+                    :to-equal "         🔴 Test - Run tests\n")
+            (expect (marker-position (oref (magit-gha-badge-tests--child 'untracked) start))
+                    :to-equal (marker-position (oref section end)))
+            (expect (get-text-property (1- (oref section end)) 'magit-section)
+                    :to-be section))
+        (kill-buffer (plist-get state :buffer)))))
+
+  (it "leaves a badge on top of the buffer on top, and a point below it below"
+    (let* ((state (magit-gha-badge-tests--render
+                   (list :status "in_progress" :workflow "CI" :sha "0ecbb23")
+                   'first))
+           (section (plist-get state :section)))
+      (unwind-protect
+          (with-current-buffer (plist-get state :buffer)
+            (goto-char (oref section end))
+            (magit-gha-badge--swap
+             (append (list :jobs (list (magit-gha-badge-tests--job "Lint" "in_progress" nil
+                                                                   "Check")))
+                     state))
+            (expect (marker-position (oref magit-root-section start)) :to-equal 1)
+            (expect (marker-position (oref section start)) :to-equal 1)
+            (expect (buffer-substring (point) (pos-eol)) :to-equal "Untracked files"))
+        (kill-buffer (plist-get state :buffer)))))
+
+  (it "keeps a collapsed badge collapsed, its new job lines hidden"
+    (let* ((state (magit-gha-badge-tests--render
+                   (list :status "in_progress" :workflow "CI" :sha "0ecbb23"
+                         :jobs (list (magit-gha-badge-tests--job "Lint" "in_progress" nil
+                                                                 "Check")))))
+           (section (plist-get state :section)))
+      (unwind-protect
+          (with-current-buffer (plist-get state :buffer)
+            (magit-section-hide section)
+            (magit-gha-badge--swap
+             (append (list :jobs (list (magit-gha-badge-tests--job "Lint" "in_progress" nil
+                                                                   "Run linter")))
+                     state))
+            (expect (invisible-p (oref section start)) :to-be nil)
+            (expect (invisible-p (oref section content)) :to-be-truthy)
+            (expect (buffer-substring (oref section content) (oref section end))
+                    :to-equal "         🟡 Lint - Run linter\n"))
+        (kill-buffer (plist-get state :buffer))))))
+
+(describe "magit-gha-badge-browse-run"
+  (it "opens the page of the job on the line at point, without a fetch"
+    (spy-on 'browse-url)
+    (spy-on 'magit-gha-badge--fetch)
+    (with-temp-buffer
+      (insert (car (magit-gha-badge--job-lines
+                    (list (magit-gha-badge-tests--job "Lint" "in_progress" nil "Check"))))
+              "\n")
+      (goto-char (point-min))
+      (end-of-line)
+      (magit-gha-badge-browse-run)
+      (expect 'browse-url :to-have-been-called-with
+              "https://github.com/agzam/.emacs.d/actions/runs/123/job/Lint")
+      (expect 'magit-gha-badge--fetch :not :to-have-been-called))))
 
 (describe "magit-gha-badge--set"
   (it "updates the cached state per repo"

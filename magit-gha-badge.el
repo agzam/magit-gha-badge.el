@@ -65,8 +65,12 @@ string is used as the token itself."
 (defconst magit-gha-badge--wait-ticks 3
   "Fetches spent waiting for GitHub to create a run for the pushed commit.")
 
+(defconst magit-gha-badge--max-job-lines 5
+  "Most lines the jobs take under the badge, a \"+N more\" line included.")
+
 (defconst magit-gha-badge--run-keys
-  '(:status :conclusion :url :sha :repo :created :workflow :title :no-runs :error)
+  '(:status :conclusion :url :sha :repo :created :workflow :title :no-runs :error
+    :id :attempt :jobs :jobs-run)
   "State keys a fetch result owns.  Merging a result replaces all of them.")
 
 (defvar magit-gha-badge--cache (make-hash-table :test #'equal)
@@ -121,7 +125,9 @@ document), so it reads as an error, not as an empty branch."
                              (alist-get 'full_name
                                         (alist-get 'head_repository run)))))
                       (alist-get 'workflow_runs payload))))
-          (list :status (alist-get 'status run)
+          (list :id (alist-get 'id run)
+                :attempt (alist-get 'run_attempt run)
+                :status (alist-get 'status run)
                 :conclusion (alist-get 'conclusion run)
                 :url (alist-get 'html_url run)
                 :sha (alist-get 'head_sha run)
@@ -132,6 +138,32 @@ document), so it reads as an error, not as an empty branch."
         '(:no-runs t))
     (list :error (or (alist-get 'message payload)
                      "Unexpected response from GitHub"))))
+
+(defun magit-gha-badge--failed-p (conclusion)
+  "Return non-nil when CONCLUSION, of a run, a job or a step, is a failure."
+  (member conclusion '("failure" "timed_out" "startup_failure")))
+
+(defun magit-gha-badge--parse-jobs (payload)
+  "Turn an actions/runs/ID/jobs response PAYLOAD into a list of job plists.
+The step is the one a running job is in, or the first one a failed job
+failed at.  A job's status lags its steps, so a running job can have no
+step in progress."
+  (mapcar
+   (lambda (job)
+     (let ((running (equal (alist-get 'status job) "in_progress")))
+       (list :name (alist-get 'name job)
+             :status (alist-get 'status job)
+             :conclusion (alist-get 'conclusion job)
+             :step (alist-get 'name
+                              (seq-find
+                               (lambda (step)
+                                 (if running
+                                     (equal (alist-get 'status step) "in_progress")
+                                   (magit-gha-badge--failed-p
+                                    (alist-get 'conclusion step))))
+                               (alist-get 'steps job)))
+             :url (alist-get 'html_url job))))
+   (alist-get 'jobs payload)))
 
 (defun magit-gha-badge--parse-repo (payload)
   "Return the upstream slug of a repo response PAYLOAD, nil when not a fork."
@@ -158,7 +190,7 @@ over time and they all mean \"not done yet\"."
     ("completed"
      (pcase conclusion
        ("success" "🟢")
-       ((or "failure" "timed_out" "startup_failure") "🔴")
+       ((pred magit-gha-badge--failed-p) "🔴")
        ((or "cancelled" "skipped" "neutral" "stale") "⚪")
        ("action_required" "🟠")
        (_ "⚪")))
@@ -271,6 +303,49 @@ the last fetch error.  Nil for a no-runs branch; ⋯ alone before any result."
                 (propertize badge 'help-echo (string-join echo "\n"))
               badge))))
 
+(defun magit-gha-badge--job-lines (jobs)
+  "Return the lines that list JOBS under the badge: failed, then running.
+Other jobs stay hidden.  Past `magit-gha-badge--max-job-lines' the last
+line counts the rest.  A job's line carries the job's page as the
+`magit-gha-badge-url' property."
+  (let* ((listed (append (seq-filter (lambda (job)
+                                       (magit-gha-badge--failed-p
+                                        (plist-get job :conclusion)))
+                                     jobs)
+                         (seq-filter (lambda (job)
+                                       (equal (plist-get job :status) "in_progress"))
+                                     jobs)))
+         (shown (if (< magit-gha-badge--max-job-lines (length listed))
+                    (seq-take listed (1- magit-gha-badge--max-job-lines))
+                  listed))
+         ;; under the badge glyph
+         (indent (make-string (string-width "Checks   ") ?\s))
+         (width (apply #'max 0 (mapcar (lambda (job)
+                                         (string-width (plist-get job :name)))
+                                       shown))))
+    (append
+     (mapcar (lambda (job)
+               (let ((name (plist-get job :name))
+                     (step (plist-get job :step)))
+                 (propertize
+                  (concat indent
+                          (magit-gha-badge--glyph (plist-get job :status)
+                                                  (plist-get job :conclusion))
+                          " " name
+                          (and step
+                               (concat (make-string (- width (string-width name)) ?\s)
+                                       " - " step)))
+                  'magit-gha-badge-url (plist-get job :url))))
+             shown)
+     (and (< (length shown) (length listed))
+          (list (format "%s+%d more" indent (- (length listed) (length shown))))))))
+
+(defun magit-gha-badge--body (state)
+  "Return the job lines of STATE as the body of the badge section."
+  (mapconcat (lambda (line) (concat line "\n"))
+             (magit-gha-badge--job-lines (plist-get state :jobs))
+             ""))
+
 (defun magit-gha-badge--browse-target (state)
   "Return (URL . MESSAGE) for browsing STATE's run.  Either half can be nil.
 A stale URL still beats no URL, so a failed fetch - and a push GitHub has
@@ -377,6 +452,32 @@ a branch of that name may well be its own."
                                          (list :error (magit-gha-badge--error-message
                                                        err (and head each))))))))))
 
+(defun magit-gha-badge--request-jobs (repo result callback)
+  "Pass RESULT to CALLBACK with the jobs of its run added as :jobs.
+A run still going is asked every fetch, a failed one once per attempt,
+cached in REPO's state, any other run never.  A failed request passes
+RESULT on as is: the runs request already reports what went wrong."
+  (let* ((status (plist-get result :status))
+         (failed (magit-gha-badge--failed-p (plist-get result :conclusion)))
+         (run (cons (plist-get result :id) (plist-get result :attempt)))
+         (state (magit-gha-badge--state repo)))
+    (cond
+     ((and failed (equal run (plist-get state :jobs-run)))
+      (funcall callback (append result (list :jobs (plist-get state :jobs)
+                                             :jobs-run run))))
+     ((or failed (and status (not (equal status "completed"))))
+      (magit-gha-badge--get (format "/repos/%s/actions/runs/%s/jobs"
+                                    (plist-get result :repo) (car run))
+                            '((filter . "latest") (per_page . "100"))
+                            (lambda (payload)
+                              (funcall callback
+                                       (append result
+                                               (list :jobs (magit-gha-badge--parse-jobs
+                                                            payload)
+                                                     :jobs-run (and failed run)))))
+                            (lambda (_err) (funcall callback result))))
+     (t (funcall callback result)))))
+
 (defun magit-gha-badge--fetch (repo &optional callback force)
   "Start an async API fetch of REPO's latest run unless one is in flight.
 FORCE runs regardless: a fetch a user asked for must not answer with the
@@ -408,7 +509,10 @@ CALLBACK, when given, receives the updated state once the fetch lands."
              (magit-gha-badge--request-runs
               branch slug parent
               (lambda (result)
-                (magit-gha-badge--on-fetch repo result callback))))
+                (magit-gha-badge--request-jobs
+                 repo result
+                 (lambda (result)
+                   (magit-gha-badge--on-fetch repo result callback))))))
            (lambda (err)
              (magit-gha-badge--on-fetch repo (list :error err) callback))))))))
 
@@ -431,7 +535,11 @@ every status refresh fetches, and a broken setup fails each of them."
       (cond
        (section
         (oset section value (plist-get state :url))
-        (magit-gha-badge--swap state))
+        (magit-gha-badge--swap state)
+        ;; a swap to nothing removes the section's text, and with it the
+        ;; place the next swap would write to
+        (unless (magit-gha-badge--line state)
+          (magit-gha-badge--set repo :section nil)))
        ;; the last render omitted the badge line (cached no-runs), so
        ;; there is nothing to swap the fresh result into; re-running
        ;; the inserters is the only way to bring it back
@@ -443,12 +551,10 @@ every status refresh fetches, and a broken setup fails each of them."
       (funcall callback state))))
 
 (defun magit-gha-badge--swap (state)
-  "Replace the badge line in place from STATE, bypassing a full refresh.
+  "Replace the badge section's text in place from STATE, bypassing a refresh.
 Skips silently unless the section's start marker still points at the
-badge line (the buffer may be killed, or erased by a refresh whose
-inserter has not run yet - writing there would corrupt the buffer).
-The start marker's insertion-type is t, so it is flipped for the insert
-to keep the new text inside the section span."
+badge (the buffer may be killed, or erased by a refresh whose inserter
+has not run yet - writing there would corrupt the buffer)."
   (let* ((section (plist-get state :section))
          (buffer (plist-get state :buffer))
          (start (and section (oref section start))))
@@ -458,18 +564,31 @@ to keep the new text inside the section span."
       (with-current-buffer buffer
         (when (eq (get-text-property start 'magit-section) section)
           (save-excursion
-            (goto-char start)
-            (let ((inhibit-read-only t)
-                  (text (magit-gha-badge--line state))
-                  (map (oref section keymap)))
-              (delete-region start (line-end-position))
-              (when text
-                (set-marker-insertion-type start nil)
-                (goto-char start)
-                (insert (apply #'propertize text
-                               'magit-section section
-                               (and map (list 'keymap (symbol-value map)))))
-                (set-marker-insertion-type start t)))))))))
+            (let* ((inhibit-read-only t)
+                   (line (magit-gha-badge--line state))
+                   (map (oref section keymap))
+                   (text (if line
+                             (apply #'propertize
+                                    (concat line "\n" (magit-gha-badge--body state))
+                                    'magit-section section
+                                    (and map (list 'keymap (symbol-value map))))
+                           "")))
+              ;; a hidden body's overlay would stretch over the new text
+              (remove-overlays start (oref section end) 'invisible t)
+              ;; unlike delete and insert, this keeps markers at either edge
+              ;; of the old text at the edges of the new, whatever their
+              ;; insertion type: the root's start, a point on the next section
+              (save-match-data
+                (set-match-data (list start (oref section end)))
+                (replace-match text t t))
+              (when line
+                (oset section content (copy-marker (+ start (length line) 1)))
+                (magit-section-maybe-add-heading-map section)
+                ;; the old text took the overlays that hide the body and
+                ;; mark the heading with it
+                (if (oref section hidden)
+                    (magit-section-hide section)
+                  (magit-section-maybe-update-visibility-indicator section))))))))))
 
 ;;;; Bounded poll
 
@@ -509,7 +628,7 @@ The timer dies here unless the callback of the new fetch re-arms it."
 
 ;;;###autoload
 (defun magit-gha-badge-insert ()
-  "Insert the GitHub Actions badge line for the current branch.
+  "Insert the GitHub Actions badge and job lines for the current branch.
 Meant for `magit-status-sections-hook'.  Renders instantly from cache
 and kicks a fire-and-forget refetch; the refresh itself never waits on
 the network."
@@ -520,7 +639,8 @@ the network."
                (line (magit-gha-badge--line state))
                (section (and line
                              (magit-insert-section (gha-badge (plist-get state :url))
-                               (insert line "\n")))))
+                               (magit-insert-heading line)
+                               (insert (magit-gha-badge--body state))))))
           (magit-gha-badge--set repo
                                 :section section
                                 :buffer (current-buffer))
@@ -533,29 +653,31 @@ the network."
 ;;;###autoload
 (defun magit-gha-badge-browse-run ()
   "Open the newest GitHub Actions run page for the current branch.
-Fetches first, and browses what that answers with: the badge - and the
-run URL it carries - can predate the push that just triggered a run.
-Falls back to the last known URL when the fetch fails."
+On a job line under the badge, open that job's page at once.  Anywhere
+else fetch first: the badge can predate the push that just triggered a
+run.  Falls back to the last known URL when the fetch fails."
   (interactive)
-  (let ((repo (magit-toplevel)))
-    (unless repo
-      (user-error "Not inside a git repository"))
-    (let* ((default-directory repo)
-           (branch (magit-get-current-branch)))
-      (unless branch
-        (user-error "Detached HEAD - no branch to look up runs for"))
-      (unless (magit-gha-badge--slug (magit-gha-badge--remote-url branch))
-        (user-error "No github remote to look up runs on")))
-    (message "Fetching the latest workflow run...")
-    (magit-gha-badge--fetch
-     repo
-     (lambda (state)
-       (let ((target (magit-gha-badge--browse-target state)))
-         (when (cdr target)
-           (message "%s" (cdr target)))
-         (when (car target)
-           (browse-url (car target)))))
-     'force)))
+  (if-let* ((job-url (get-text-property (pos-bol) 'magit-gha-badge-url)))
+      (browse-url job-url)
+    (let ((repo (magit-toplevel)))
+      (unless repo
+        (user-error "Not inside a git repository"))
+      (let* ((default-directory repo)
+             (branch (magit-get-current-branch)))
+        (unless branch
+          (user-error "Detached HEAD - no branch to look up runs for"))
+        (unless (magit-gha-badge--slug (magit-gha-badge--remote-url branch))
+          (user-error "No github remote to look up runs on")))
+      (message "Fetching the latest workflow run...")
+      (magit-gha-badge--fetch
+       repo
+       (lambda (state)
+         (let ((target (magit-gha-badge--browse-target state)))
+           (when (cdr target)
+             (message "%s" (cdr target)))
+           (when (car target)
+             (browse-url (car target)))))
+       'force))))
 
 (provide 'magit-gha-badge)
 ;;; magit-gha-badge.el ends here
