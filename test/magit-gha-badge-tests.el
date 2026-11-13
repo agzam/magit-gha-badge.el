@@ -56,13 +56,45 @@ A resource absent from it answers through the errorback.")
 (defvar magit-gha-badge-tests--calls nil
   "Alist of API resource to params, in reverse order of request.")
 
+;; what ghub hands an errorback for an HTTP error: url.el's error with
+;; the parsed error document appended
+(defconst magit-gha-badge-tests--not-found
+  '(error http 404 ((message . "Not Found")
+                    (documentation_url . "https://docs.github.com/rest")
+                    (status . "404"))))
+
+(defconst magit-gha-badge-tests--no-token
+  (concat "Required Github token (\"agzam^ghub\" for \"api.github.com\") does not exist.\n"
+          "See https://docs.magit.vc/ghub/Getting-Started.html")
+  "What `ghub-request' signals, before any request, when the token is missing.")
+
 (defun magit-gha-badge-tests--ghub (_method resource &optional params &rest args)
   "Answer a request for RESOURCE with PARAMS from the canned answers.
 ARGS carries the `ghub-request' keywords, of which the callbacks are used."
   (push (cons resource params) magit-gha-badge-tests--calls)
   (if-let* ((answer (assoc resource magit-gha-badge-tests--answers)))
       (funcall (plist-get args :callback) (cdr answer))
-    (funcall (plist-get args :errorback))))
+    (funcall (plist-get args :errorback) magit-gha-badge-tests--not-found)))
+
+(defun magit-gha-badge-tests--ghub-signal (_method resource &rest _)
+  "Record a request for RESOURCE, then signal like ghub without a token."
+  (push (cons resource nil) magit-gha-badge-tests--calls)
+  (error "%s" magit-gha-badge-tests--no-token))
+
+(defvar magit-gha-badge-tests--timers nil
+  "Functions with their args the `run-at-time' stub queued, newest first.")
+
+(defun magit-gha-badge-tests--queue-timer (_time _repeat function &rest args)
+  "Queue FUNCTION with ARGS instead of arming a timer."
+  (push (cons function args) magit-gha-badge-tests--timers))
+
+(defun magit-gha-badge-tests--run-timers ()
+  "Run the queued timers oldest first, including the ones they queue."
+  (when-let* ((timers (reverse magit-gha-badge-tests--timers)))
+    (setq magit-gha-badge-tests--timers nil)
+    (dolist (timer timers)
+      (apply (car timer) (cdr timer)))
+    (magit-gha-badge-tests--run-timers)))
 
 (defun magit-gha-badge-tests--params (resource)
   "Return the params RESOURCE was requested with."
@@ -129,10 +161,25 @@ round to a stable count."
   (it "turns an empty run list into the no-runs sentinel"
     (expect (magit-gha-badge--parse-payload '((total_count . 0) (workflow_runs . ())))
             :to-equal '(:no-runs t)))
-  (it "treats a payload without workflow_runs as an error"
+  (it "treats a payload without workflow_runs as an error, with its message"
     (expect (magit-gha-badge--parse-payload '((message . "Not Found")))
-            :to-equal '(:error t))
-    (expect (magit-gha-badge--parse-payload nil) :to-equal '(:error t))))
+            :to-equal '(:error "Not Found"))
+    (expect (magit-gha-badge--parse-payload nil)
+            :to-equal '(:error "Unexpected response from GitHub"))))
+
+(describe "magit-gha-badge--error-message"
+  (it "turns an HTTP error into its code and GitHub's message, docs on line 2"
+    (expect (magit-gha-badge--error-message magit-gha-badge-tests--not-found)
+            :to-equal "404 Not Found\nhttps://docs.github.com/rest"))
+  (it "names the repo an HTTP error came from when given one"
+    (expect (magit-gha-badge--error-message magit-gha-badge-tests--not-found "cli/cli")
+            :to-equal "404 Not Found (cli/cli)\nhttps://docs.github.com/rest"))
+  (it "survives an HTTP error with an empty body"
+    (expect (magit-gha-badge--error-message '(error http 502 nil))
+            :to-equal "502 HTTP error"))
+  (it "keeps the text of a signaled error, every line of it"
+    (expect (magit-gha-badge--error-message (list 'error magit-gha-badge-tests--no-token))
+            :to-equal magit-gha-badge-tests--no-token)))
 
 (describe "magit-gha-badge--parse-repo"
   (it "returns the upstream slug of a fork"
@@ -153,14 +200,17 @@ round to a stable count."
             :to-equal "new"))
   (it "prefers a run over an error or an empty answer"
     (expect (plist-get (magit-gha-badge--combine
-                        '((:error t)
+                        '((:error "404 Not Found")
                           (:no-runs t)
                           (:created "2026-08-19T10:00:00Z" :url "u")))
                        :url)
             :to-equal "u"))
   (it "reports an error only when no answer held a run"
-    (expect (magit-gha-badge--combine '((:error t) (:no-runs t)))
-            :to-equal '(:error t)))
+    (expect (magit-gha-badge--combine '((:no-runs t) (:error "404 Not Found")))
+            :to-equal '(:error "404 Not Found")))
+  (it "keeps the first error when every answer failed"
+    (expect (magit-gha-badge--combine '((:error "Fork failed") (:error "Upstream failed")))
+            :to-equal '(:error "Fork failed")))
   (it "reports no runs when every answer was empty"
     (expect (magit-gha-badge--combine '((:no-runs t) (:no-runs t)))
             :to-equal '(:no-runs t))))
@@ -193,7 +243,8 @@ round to a stable count."
   (it "stops when the branch was never pushed"
     (expect (magit-gha-badge--waiting-p '(:sha "old")) :to-be nil))
   (it "stops on a fetch error"
-    (expect (magit-gha-badge--waiting-p '(:pushed "new" :sha "old" :error t)) :to-be nil))
+    (expect (magit-gha-badge--waiting-p '(:pushed "new" :sha "old" :error "502 HTTP error"))
+            :to-be nil))
   (it "gives up once the wait budget is spent"
     (expect (magit-gha-badge--waiting-p
              (list :pushed "new" :sha "old" :waits magit-gha-badge--wait-ticks))
@@ -235,7 +286,8 @@ round to a stable count."
              '(:status "completed" :conclusion "success" :sha "new" :pushed "new"))
             :to-be nil))
   (it "does not re-arm on a fetch error, even with a stale pending status"
-    (expect (magit-gha-badge--pending-p '(:status "in_progress" :error t)) :to-be nil))
+    (expect (magit-gha-badge--pending-p '(:status "in_progress" :error "502 HTTP error"))
+            :to-be nil))
   (it "does not re-arm when the branch has no runs"
     (expect (magit-gha-badge--pending-p '(:no-runs t)) :to-be nil))
   (it "does not re-arm before any result arrived"
@@ -244,7 +296,7 @@ round to a stable count."
 (describe "magit-gha-badge--merge-result"
   (it "replaces run fields and clears stale error/no-runs flags"
     (let ((merged (magit-gha-badge--merge-result
-                   '(:status "in_progress" :error t :timer tm)
+                   '(:status "in_progress" :error "401 Bad credentials" :timer tm)
                    '(:status "completed" :conclusion "success" :url "u"))))
       (expect (plist-get merged :status) :to-equal "completed")
       (expect (plist-get merged :url) :to-equal "u")
@@ -264,13 +316,13 @@ round to a stable count."
       (expect (plist-get merged :parent) :to-equal '("agzam/cli" . "cli/cli"))
       (expect (plist-get merged :pushed) :to-equal "cafe")
       (expect (plist-get merged :waits) :to-equal 2)))
-  (it "keeps the previous truth on a fetch error"
+  (it "keeps the previous truth on a fetch error, and the error's text"
     (let ((merged (magit-gha-badge--merge-result
                    '(:status "completed" :conclusion "success" :url "old")
-                   '(:error t))))
+                   '(:error "401 Bad credentials"))))
       (expect (plist-get merged :url) :to-equal "old")
       (expect (plist-get merged :status) :to-equal "completed")
-      (expect (plist-get merged :error) :to-be t)))
+      (expect (plist-get merged :error) :to-equal "401 Bad credentials")))
   (it "clears run fields when the branch has no runs anymore"
     (let ((merged (magit-gha-badge--merge-result
                    '(:status "completed" :url "old" :repo "cli/cli"
@@ -283,7 +335,7 @@ round to a stable count."
       (expect (plist-get merged :no-runs) :to-be t)))
   (it "does not mutate the input state"
     (let ((state (list :status "completed" :url "old")))
-      (magit-gha-badge--merge-result state '(:error t))
+      (magit-gha-badge--merge-result state '(:error "401 Bad credentials"))
       (magit-gha-badge--merge-result state '(:status "queued"))
       (expect state :to-equal '(:status "completed" :url "old")))))
 
@@ -357,13 +409,25 @@ round to a stable count."
               :to-equal "tidy up")))
   (it "renders nothing for a branch with no runs"
     (expect (magit-gha-badge--line '(:no-runs t)) :to-be nil))
-  (it "renders nothing for an error with no previous truth"
-    (expect (magit-gha-badge--line '(:error t)) :to-be nil))
-  (it "keeps showing the previous truth on an error"
+  (it "shows the error's summary when there is no previous truth"
+    (expect (magit-gha-badge--line
+             '(:error "401 Bad credentials\nhttps://docs.github.com/rest"))
+            :to-equal "Checks   ❗ 401 Bad credentials"))
+  (it "keeps showing the previous truth on an error, the summary after it"
     (expect (magit-gha-badge--line
              '(:status "completed" :conclusion "failure" :workflow "CI"
-               :sha "0ecbb23" :error t))
-            :to-equal "Checks   🔴 CI 0ecbb23")))
+               :sha "0ecbb23" :error "401 Bad credentials\nhttps://docs.github.com/rest"))
+            :to-equal "Checks   🔴 CI 0ecbb23 ❗ 401 Bad credentials"))
+  (it "carries the run title and the full error as help-echo"
+    (let ((line (magit-gha-badge--line
+                 '(:status "completed" :conclusion "success" :workflow "CI"
+                   :sha "0ecbb23" :title "tidy up"
+                   :error "401 Bad credentials\nhttps://docs.github.com/rest"))))
+      (expect (get-text-property (1- (length line)) 'help-echo line)
+              :to-equal "tidy up\n401 Bad credentials\nhttps://docs.github.com/rest")))
+  (it "renders an error cached as t, as a cache from an in-place upgrade holds it"
+    (expect (magit-gha-badge--line '(:error t))
+            :to-equal "Checks   ❗ Fetching workflow runs failed")))
 
 (describe "magit-gha-badge--browse-target"
   (it "opens the fetched run without a word"
@@ -375,14 +439,18 @@ round to a stable count."
     (let ((target (magit-gha-badge--browse-target '(:url "u" :sha "old" :pushed "new"))))
       (expect (car target) :to-equal "u")
       (expect (cdr target) :to-match "pushed commit")))
-  (it "falls back to the last known run when the fetch failed"
-    (let ((target (magit-gha-badge--browse-target '(:url "u" :error t))))
+  (it "falls back to the last known run when the fetch failed, and says why"
+    (let ((target (magit-gha-badge--browse-target
+                   '(:url "u" :error "401 Bad credentials"))))
       (expect (car target) :to-equal "u")
-      (expect (cdr target) :to-match "failed")))
-  (it "reports a failure with nothing to fall back on"
-    (let ((target (magit-gha-badge--browse-target '(:error t))))
+      (expect (cdr target)
+              :to-equal (concat "Fetching workflow runs failed, opening the last"
+                                " known run: 401 Bad credentials"))))
+  (it "reports a failure with nothing to fall back on, and says why"
+    (let ((target (magit-gha-badge--browse-target '(:error "401 Bad credentials"))))
       (expect (car target) :to-be nil)
-      (expect (cdr target) :to-match "failed")))
+      (expect (cdr target)
+              :to-equal "Fetching workflow runs failed: 401 Bad credentials")))
   (it "reports a branch with no runs"
     (let ((target (magit-gha-badge--browse-target '(:no-runs t))))
       (expect (car target) :to-be nil)
@@ -443,11 +511,36 @@ round to a stable count."
       (expect (plist-get result :workflow) :to-equal "CI")
       (expect (plist-get result :error) :to-be nil)))
 
-  (it "reports an error when neither repo answers"
+  (it "reports the fork's own error when neither repo answers"
     (let (result)
       (magit-gha-badge--request-runs "fix" "agzam/cli" "cli/cli"
                                      (lambda (r) (setq result r)))
-      (expect result :to-equal '(:error t)))))
+      (expect result
+              :to-equal '(:error "404 Not Found\nhttps://docs.github.com/rest"))))
+
+  (it "names the upstream when only its request failed"
+    (let ((magit-gha-badge-tests--answers
+           (list (cons "/repos/agzam/cli/actions/runs"
+                       '((total_count . 0) (workflow_runs . ())))))
+          result)
+      (magit-gha-badge--request-runs "fix" "agzam/cli" "cli/cli"
+                                     (lambda (r) (setq result r)))
+      (expect (plist-get result :error)
+              :to-equal "404 Not Found (cli/cli)\nhttps://docs.github.com/rest")))
+
+  (it "reports the fork's own error whichever answer lands first"
+    (let ((errorbacks nil)
+          result)
+      (spy-on 'ghub-request
+              :and-call-fake (lambda (_method _resource &optional _params &rest args)
+                               (push (plist-get args :errorback) errorbacks)))
+      (magit-gha-badge--request-runs "fix" "agzam/cli" "cli/cli"
+                                     (lambda (r) (setq result r)))
+      ;; newest first: the upstream answers before the fork
+      (dolist (errorback errorbacks)
+        (funcall errorback magit-gha-badge-tests--not-found))
+      (expect (plist-get result :error)
+              :to-equal "404 Not Found\nhttps://docs.github.com/rest"))))
 
 (describe "magit-gha-badge--parent-slug"
   (before-each
@@ -465,9 +558,9 @@ round to a stable count."
       (unwind-protect
           (progn
             (magit-gha-badge--parent-slug repo "agzam/cli"
-                                          (lambda (p) (push p parents)))
+                                          (lambda (p) (push p parents)) #'ignore)
             (magit-gha-badge--parent-slug repo "agzam/cli"
-                                          (lambda (p) (push p parents)))
+                                          (lambda (p) (push p parents)) #'ignore)
             (expect parents :to-equal '("cli/cli" "cli/cli"))
             (expect (length magit-gha-badge-tests--calls) :to-equal 1))
         (remhash repo magit-gha-badge--cache))))
@@ -480,24 +573,105 @@ round to a stable count."
       (unwind-protect
           (progn
             (magit-gha-badge--parent-slug repo "agzam/.emacs.d"
-                                          (lambda (p) (push p parents)))
+                                          (lambda (p) (push p parents)) #'ignore)
             (magit-gha-badge--parent-slug repo "agzam/.emacs.d"
-                                          (lambda (p) (push p parents)))
+                                          (lambda (p) (push p parents)) #'ignore)
             (expect parents :to-equal '(nil nil))
             (expect (length magit-gha-badge-tests--calls) :to-equal 1))
         (remhash repo magit-gha-badge--cache))))
 
-  (it "does not cache a failed lookup"
+  (it "hands a failed lookup's error to the errorback, and does not cache it"
     (let ((repo "/tmp/magit-gha-badge-test-repo/")
-          (parents nil))
+          (parents nil)
+          (failures nil))
       (unwind-protect
           (progn
             (magit-gha-badge--parent-slug repo "agzam/cli"
-                                          (lambda (p) (push p parents)))
+                                          (lambda (p) (push p parents))
+                                          (lambda (e) (push e failures)))
             (magit-gha-badge--parent-slug repo "agzam/cli"
-                                          (lambda (p) (push p parents)))
-            (expect parents :to-equal '(nil nil))
+                                          (lambda (p) (push p parents))
+                                          (lambda (e) (push e failures)))
+            (expect parents :to-be nil)
+            (expect failures
+                    :to-equal (make-list 2 "404 Not Found\nhttps://docs.github.com/rest"))
             (expect (length magit-gha-badge-tests--calls) :to-equal 2))
+        (remhash repo magit-gha-badge--cache)))))
+
+(describe "a signal from ghub-request"
+  (before-each
+    (setq magit-gha-badge-tests--calls nil
+          magit-gha-badge-tests--timers nil)
+    (spy-on 'ghub-request :and-call-fake #'magit-gha-badge-tests--ghub-signal)
+    (spy-on 'run-at-time :and-call-fake #'magit-gha-badge-tests--queue-timer))
+
+  (it "reaches the callback of a runs request after the caller returned"
+    (let (result)
+      (magit-gha-badge--request-runs "fix" "agzam/cli" "cli/cli"
+                                     (lambda (r) (setq result r)))
+      (expect (length magit-gha-badge-tests--calls) :to-equal 2)
+      (expect result :to-be nil)
+      (magit-gha-badge-tests--run-timers)
+      (expect result :to-equal (list :error magit-gha-badge-tests--no-token))))
+
+  (it "never escapes a fetch, which runs inside the magit refresh"
+    (spy-on 'message)
+    (spy-on 'magit-get-current-branch :and-return-value "fix")
+    (spy-on 'magit-gha-badge--remote-url
+            :and-return-value "git@github.com:agzam/cli.git")
+    (spy-on 'magit-gha-badge--pushed-sha :and-return-value nil)
+    (let ((repo "/tmp/magit-gha-badge-test-repo/"))
+      (unwind-protect
+          (progn
+            (expect (magit-gha-badge--fetch repo) :not :to-throw)
+            (expect (plist-get (magit-gha-badge--state repo) :fetching)
+                    :to-be-truthy)
+            (magit-gha-badge-tests--run-timers)
+            (expect (plist-get (magit-gha-badge--state repo) :fetching) :to-be nil)
+            (expect (plist-get (magit-gha-badge--state repo) :error)
+                    :to-equal magit-gha-badge-tests--no-token)
+            ;; the failed parent lookup ends the fetch
+            (expect (length magit-gha-badge-tests--calls) :to-equal 1)
+            (expect (spy-calls-all-args 'message)
+                    :to-equal (list (list "magit-gha-badge: %s"
+                                          magit-gha-badge-tests--no-token))))
+        (remhash repo magit-gha-badge--cache)))))
+
+(describe "magit-gha-badge--on-fetch"
+  (before-each
+    (spy-on 'message))
+
+  (it "echoes an error once, and again only when it changes"
+    (let ((repo "/tmp/magit-gha-badge-test-repo/"))
+      (unwind-protect
+          (progn
+            (magit-gha-badge--on-fetch repo '(:error "401 Bad credentials"))
+            (magit-gha-badge--on-fetch repo '(:error "401 Bad credentials"))
+            (expect (spy-calls-all-args 'message)
+                    :to-equal '(("magit-gha-badge: %s" "401 Bad credentials")))
+            (magit-gha-badge--on-fetch repo '(:error "404 Not Found"))
+            (expect (spy-calls-count 'message) :to-equal 2))
+        (remhash repo magit-gha-badge--cache))))
+
+  (it "echoes a recurring error again once a fetch succeeded in between"
+    (let ((repo "/tmp/magit-gha-badge-test-repo/"))
+      (unwind-protect
+          (progn
+            (magit-gha-badge--on-fetch repo '(:error "401 Bad credentials"))
+            (magit-gha-badge--on-fetch repo '(:no-runs t))
+            (magit-gha-badge--on-fetch repo '(:error "401 Bad credentials"))
+            (expect (spy-calls-count 'message) :to-equal 2))
+        (remhash repo magit-gha-badge--cache))))
+
+  (it "leaves the report to a callback"
+    (let ((repo "/tmp/magit-gha-badge-test-repo/")
+          (states nil))
+      (unwind-protect
+          (progn
+            (magit-gha-badge--on-fetch repo '(:error "401 Bad credentials")
+                                       (lambda (state) (push state states)))
+            (expect (spy-calls-count 'message) :to-equal 0)
+            (expect (plist-get (car states) :error) :to-equal "401 Bad credentials"))
         (remhash repo magit-gha-badge--cache)))))
 
 (describe "magit-gha-badge--set"
