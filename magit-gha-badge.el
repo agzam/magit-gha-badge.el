@@ -6,7 +6,7 @@
 ;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: August 18, 2026
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Keywords: vc tools
 ;; Homepage: https://github.com/agzam/magit-gha-badge.el
 ;; Package-Requires: ((emacs "29.1") (magit "4.0.0") (ghub "4.0.0"))
@@ -92,6 +92,19 @@ Case-insensitively: a remote URL keeps whatever case it was typed with,
 the API answers with the canonical spelling."
   (and a b (string-equal-ignore-case a b)))
 
+(defun magit-gha-badge--error-message (err &optional repo)
+  "Return ERR, an error ghub reported or signaled, as text.
+The first line is the summary the badge shows.  REPO, the upstream of a
+fork, names the repo an HTTP error came from."
+  (pcase err
+    (`(error http ,code ,payload . ,_)
+     (let ((text (alist-get 'message payload))
+           (doc (alist-get 'documentation_url payload)))
+       (concat (format "%s %s" code (or text "HTTP error"))
+               (and repo (format " (%s)" repo))
+               (and doc (concat "\n" doc)))))
+    (_ (error-message-string err))))
+
 (defun magit-gha-badge--parse-payload (payload &optional head-slug)
   "Turn an actions/runs response PAYLOAD alist into a result plist.
 HEAD-SLUG, when given, keeps only runs whose head repo is HEAD-SLUG: the
@@ -117,22 +130,22 @@ document), so it reads as an error, not as an empty branch."
                 :workflow (alist-get 'name run)
                 :title (alist-get 'display_title run))
         '(:no-runs t))
-    '(:error t)))
+    (list :error (or (alist-get 'message payload)
+                     "Unexpected response from GitHub"))))
 
 (defun magit-gha-badge--parse-repo (payload)
   "Return the upstream slug of a repo response PAYLOAD, nil when not a fork."
   (alist-get 'full_name (alist-get 'parent payload)))
 
 (defun magit-gha-badge--combine (results)
-  "Reduce fetch RESULTS to the newest run, else an error, else no-runs.
+  "Reduce fetch RESULTS to the newest run, else the first error, else no-runs.
 A repo and its upstream answer separately, so an error from one must not
 hide the run the other did return."
   (or (car (seq-sort (lambda (a b)
                        (string< (plist-get b :created) (plist-get a :created)))
                      (seq-filter (lambda (result) (plist-get result :created))
                                  results)))
-      (and (seq-some (lambda (result) (plist-get result :error)) results)
-           '(:error t))
+      (seq-find (lambda (result) (plist-get result :error)) results)
       '(:no-runs t)))
 
 (defun magit-gha-badge--glyph (status conclusion)
@@ -157,7 +170,7 @@ An error keeps the previous run fields so the badge shows the last
 known truth instead of going blank on a transient fetch failure."
   (let ((state (copy-sequence state)))
     (if (plist-get result :error)
-        (plist-put state :error t)
+        (plist-put state :error (plist-get result :error))
       (dolist (key magit-gha-badge--run-keys)
         (setq state (plist-put state key (plist-get result key))))
       state)))
@@ -212,16 +225,20 @@ margin counts commit ages in."
     (pcase-let ((`(,count ,unit) (magit--age (float-time (date-to-time created)))))
       (format "%s %s ago" count unit))))
 
+(defun magit-gha-badge--error-text (state)
+  "Return the text of STATE's fetch error, nil without one.
+A cache that outlived an in-place upgrade of this package holds t there."
+  (when-let* ((err (plist-get state :error)))
+    (if (stringp err) err "Fetching workflow runs failed")))
+
 (defun magit-gha-badge--badge (state)
   "Return glyph + workflow + short sha + age for STATE, nil when nothing to show.
-The run's repo follows the sha when the run did not happen in the repo
-the branch is pushed to, and how long ago the run started follows that.
-A trailing ellipsis marks a run older than the pushed commit, whose own
-run GitHub has yet to create.  Nil for a cached no-runs branch, and for
-a fetch failure with no previously fetched truth to keep showing.  No
-result at all renders a placeholder, so a cold status buffer shows the
-fetch is underway."
-  (let ((sha (plist-get state :sha)))
+The run's repo follows the sha when the branch pushes to another repo, ⋯
+marks a run older than the pushed commit, and ❗ with a summary carries
+the last fetch error.  Nil for a no-runs branch; ⋯ alone before any result."
+  (let ((sha (plist-get state :sha))
+        (failed (when-let* ((err (magit-gha-badge--error-text state)))
+                  (concat "❗ " (car (split-string err "\n"))))))
     (cond
      ((plist-get state :status)
       (string-join
@@ -234,9 +251,10 @@ fetch is underway."
                        (when-let* ((age (magit-gha-badge--age
                                          (plist-get state :created))))
                          (concat "- " age))
-                       (and (magit-gha-badge--waiting-p state) "⋯")))
+                       (and (magit-gha-badge--waiting-p state) "⋯")
+                       failed))
        " "))
-     ((plist-get state :error) nil)
+     (failed)
      ((magit-gha-badge--waiting-p state) "⋯")
      ((plist-get state :no-runs) nil)
      (t "⋯"))))
@@ -248,22 +266,25 @@ fetch is underway."
                         'face 'magit-section-heading
                         'font-lock-face 'magit-section-heading)
             "   "
-            (if-let* ((title (plist-get state :title)))
-                (propertize badge 'help-echo title)
+            (if-let* ((echo (delq nil (list (plist-get state :title)
+                                            (magit-gha-badge--error-text state)))))
+                (propertize badge 'help-echo (string-join echo "\n"))
               badge))))
 
 (defun magit-gha-badge--browse-target (state)
   "Return (URL . MESSAGE) for browsing STATE's run.  Either half can be nil.
 A stale URL still beats no URL, so a failed fetch - and a push GitHub has
 no run for yet - opens the previous run and says so."
-  (let ((url (plist-get state :url)))
+  (let ((url (plist-get state :url))
+        (err (magit-gha-badge--error-text state)))
     (cond
-     ((and url (plist-get state :error))
-      (cons url "Fetching workflow runs failed - opening the last known run"))
+     ((and url err)
+      (cons url (concat "Fetching workflow runs failed, opening the last known run: "
+                        err)))
      (url (cons url (and (magit-gha-badge--waiting-p state)
                          (concat "No run for the pushed commit yet"
                                  " - opening the previous one"))))
-     ((plist-get state :error) (cons nil "Fetching workflow runs failed"))
+     (err (cons nil (concat "Fetching workflow runs failed: " err)))
      (t (cons nil "No workflow runs for this branch")))))
 
 ;;;; Cache
@@ -297,20 +318,33 @@ that left the machine."
                         (magit-get-upstream-branch branch)
                         (concat "origin/" branch))))
 
-(defun magit-gha-badge--parent-slug (repo slug callback)
+(defun magit-gha-badge--get (resource params callback errorback)
+  "GET RESOURCE with PARAMS; CALLBACK gets the payload, ERRORBACK the error.
+A signal from `ghub-request' itself - no token, no `github.user', no
+connection - reaches ERRORBACK from a timer: the caller may be a magit
+refresh, which a signal would abort and a callback must not run inside."
+  (condition-case err
+      (ghub-request "GET" resource params
+                    :auth magit-gha-badge-auth
+                    :callback (lambda (payload &rest _) (funcall callback payload))
+                    :errorback (lambda (err &rest _) (funcall errorback err)))
+    (error (run-at-time 0 nil errorback err))))
+
+(defun magit-gha-badge--parent-slug (repo slug callback errorback)
   "Call CALLBACK with the upstream slug of SLUG, nil when SLUG is no fork.
 Cached per REPO, since fork parentage does not change.  A failed lookup
-is not cached, so the next fetch asks again."
+is not cached: ERRORBACK gets its error text, and the next fetch asks again."
   (let ((cached (plist-get (magit-gha-badge--state repo) :parent)))
     (if (equal (car cached) slug)
         (funcall callback (cdr cached))
-      (ghub-request "GET" (format "/repos/%s" slug) nil
-                    :auth magit-gha-badge-auth
-                    :callback (lambda (payload &rest _)
-                                (let ((parent (magit-gha-badge--parse-repo payload)))
-                                  (magit-gha-badge--set repo :parent (cons slug parent))
-                                  (funcall callback parent)))
-                    :errorback (lambda (&rest _) (funcall callback nil))))))
+      (magit-gha-badge--get (format "/repos/%s" slug) nil
+                            (lambda (payload)
+                              (let ((parent (magit-gha-badge--parse-repo payload)))
+                                (magit-gha-badge--set repo :parent (cons slug parent))
+                                (funcall callback parent)))
+                            (lambda (err)
+                              (funcall errorback
+                                       (magit-gha-badge--error-message err)))))))
 
 (defun magit-gha-badge--request-runs (branch slug parent callback)
   "Ask SLUG and PARENT for BRANCH's newest run, pass the newest to CALLBACK.
@@ -318,24 +352,30 @@ PARENT, non-nil only for a fork, is asked with a wider page and its
 answer is narrowed to runs whose head repo is SLUG: the runs it has for
 a branch of that name may well be its own."
   (let* ((slugs (delq nil (list slug parent)))
-         (pending (length slugs))
-         (results nil)
-         (report (lambda (result)
-                   (push result results)
-                   (when (zerop (setq pending (1- pending)))
-                     (funcall callback (magit-gha-badge--combine results))))))
+         (answers nil)
+         (report (lambda (each result)
+                   ;; answers land in any order; combining them in the order
+                   ;; of `slugs' keeps the error text the same fetch to fetch
+                   (push (cons each result) answers)
+                   (when (= (length answers) (length slugs))
+                     (funcall callback
+                              (magit-gha-badge--combine
+                               (mapcar (lambda (each)
+                                         (alist-get each answers nil nil #'equal))
+                                       slugs)))))))
     (dolist (each slugs)
       (let ((head (unless (equal each slug) slug)))
-        (ghub-request "GET" (format "/repos/%s/actions/runs" each)
-                      `((branch . ,branch)
-                        (per_page . ,(if head "10" "1"))
-                        (exclude_pull_requests . "true"))
-                      :auth magit-gha-badge-auth
-                      :callback (lambda (payload &rest _)
-                                  (funcall report (magit-gha-badge--parse-payload
-                                                   payload head)))
-                      :errorback (lambda (&rest _)
-                                   (funcall report '(:error t))))))))
+        (magit-gha-badge--get (format "/repos/%s/actions/runs" each)
+                              `((branch . ,branch)
+                                (per_page . ,(if head "10" "1"))
+                                (exclude_pull_requests . "true"))
+                              (lambda (payload)
+                                (funcall report each (magit-gha-badge--parse-payload
+                                                      payload head)))
+                              (lambda (err)
+                                (funcall report each
+                                         (list :error (magit-gha-badge--error-message
+                                                       err (and head each))))))))))
 
 (defun magit-gha-badge--fetch (repo &optional callback force)
   "Start an async API fetch of REPO's latest run unless one is in flight.
@@ -368,24 +408,33 @@ CALLBACK, when given, receives the updated state once the fetch lands."
              (magit-gha-badge--request-runs
               branch slug parent
               (lambda (result)
-                (magit-gha-badge--on-fetch repo result callback))))))))))
+                (magit-gha-badge--on-fetch repo result callback))))
+           (lambda (err)
+             (magit-gha-badge--on-fetch repo (list :error err) callback))))))))
 
 (defun magit-gha-badge--on-fetch (repo result &optional callback)
   "Cache fetch RESULT for REPO, redraw the badge, manage the poll.
-CALLBACK, when given, receives the updated state."
+CALLBACK, when given, receives the updated state.  An error unlike the
+last one is echoed once, unless CALLBACK reports the outcome itself:
+every status refresh fetches, and a broken setup fails each of them."
   (magit-gha-badge--set repo :fetching nil)
-  (let ((state (magit-gha-badge--count-wait
-                (magit-gha-badge--merge-result (magit-gha-badge--state repo) result))))
+  (let* ((previous (magit-gha-badge--state repo))
+         (state (magit-gha-badge--count-wait
+                 (magit-gha-badge--merge-result previous result))))
     (puthash repo state magit-gha-badge--cache)
+    (when-let* ((err (plist-get result :error))
+                ((not callback))
+                ((not (equal err (plist-get previous :error)))))
+      (message "magit-gha-badge: %s" err))
     (let ((section (plist-get state :section))
           (buffer (plist-get state :buffer)))
       (cond
        (section
         (oset section value (plist-get state :url))
         (magit-gha-badge--swap state))
-       ;; the last render omitted the badge line (cached no-runs or
-       ;; error), so there is nothing to swap the fresh result into;
-       ;; re-running the inserters is the only way to bring it back
+       ;; the last render omitted the badge line (cached no-runs), so
+       ;; there is nothing to swap the fresh result into; re-running
+       ;; the inserters is the only way to bring it back
        ((and (buffer-live-p buffer) (magit-gha-badge--line state))
         (with-current-buffer buffer (magit-refresh-buffer)))))
     (when (magit-gha-badge--pending-p state)
