@@ -1,3 +1,8 @@
+* 0.5.0
+- While a run is going, the badge lists each running job with its current step and each failed job with the step that failed, failed jobs first. A finished red run keeps its failed jobs; a green run goes back to the single line. Past five jobs, four lines and =+N more=.
+- =TAB= collapses the job lines, and =RET= on a job line opens that job's page.
+- A branch that turns out to have no runs no longer leaves an empty line where the badge was.
+
 * 0.4.0
 - A failed fetch says why on the badge line: =Checks   ❗ 401 Bad credentials=, after the last known run when there is one. The tooltip holds the full error, =magit-gha-badge-browse-run= says why too, and the echo area shows each new error once.
 - A missing token, a missing =github.user= or no network no longer stops magit from drawing the rest of the status buffer.

@@ -6,7 +6,7 @@
 ;; Assisted-by: ECA:claude-opus-5
 ;; Maintainer: Ag Ibragimov <agzam.ibragimov@gmail.com>
 ;; Created: August 18, 2026
-;; Version: 0.4.0
+;; Version: 0.5.0
 ;; Keywords: vc tools
 ;; Homepage: https://github.com/agzam/magit-gha-badge.el
 ;; Package-Requires: ((emacs "29.1") (magit "4.0.0") (ghub "4.0.0"))
