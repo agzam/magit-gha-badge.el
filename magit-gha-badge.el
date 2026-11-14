@@ -17,15 +17,16 @@
 
 ;;; Commentary:
 
-;; A README-style GitHub Actions status badge as a one-line section at
-;; the top of the magit status buffer, fetched asynchronously from the
-;; GitHub API (via `ghub') on every status refresh.  RET or mouse-1 on
-;; the badge - and `magit-gha-badge-browse-run' from any buffer in the
-;; repo - refetches and opens the newest run page.  In a fork the
-;; upstream repo is asked too, since that is where the runs of a pull
-;; request from the fork live.  No steady-state timers: a bounded poll
-;; runs only while a run is pending, or while a pushed commit has no
-;; run yet, and the status buffer stays displayed.
+;; A README-style GitHub Actions status badge at the top of the magit
+;; status buffer, fetched asynchronously from the GitHub API (via
+;; `ghub') on every status refresh.  While a run is going, a line per
+;; running or failed job sits below it, with the job's step.  RET or
+;; mouse-1 on the badge - and `magit-gha-badge-browse-run' from any
+;; buffer in the repo - refetches and opens the newest run page.  In a
+;; fork the upstream repo is asked too, since that is where the runs
+;; of a pull request from the fork live.  No steady-state timers: a
+;; bounded poll runs only while a run is pending, or while a pushed
+;; commit has no run yet, and the status buffer stays displayed.
 ;;
 ;; Setup:
 ;;

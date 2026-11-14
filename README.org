@@ -8,11 +8,23 @@ A README-style GitHub Actions status badge in the magit status buffer.
 Checks   🟢 CI 0ecbb23 - 5 minutes ago
 #+end_example
 
-One line at the top of =magit-status=, fetched asynchronously from the GitHub API (via [[https://github.com/magit/ghub][ghub]]) on every status refresh - the refresh never waits on the network. =RET= or =mouse-1= on the badge opens the newest workflow run page; =M-x magit-gha-badge-browse-run= does the same from any buffer in the repo. Both refetch before they open anything, so a run that started after the last refresh is the one you land on. No steady-state timers: a bounded poll (=magit-gha-badge-poll-interval=, 30s) runs only while a run is pending and the status buffer stays displayed, then dies.
+A section at the top of =magit-status=, fetched asynchronously from the GitHub API (via [[https://github.com/magit/ghub][ghub]]) on every status refresh - the refresh never waits on the network. =RET= or =mouse-1= on the badge opens the newest workflow run page; =M-x magit-gha-badge-browse-run= does the same from any buffer in the repo. Both refetch before they open anything, so a run that started after the last refresh is the one you land on. No steady-state timers: a bounded poll (=magit-gha-badge-poll-interval=, 30s) runs only while a run is pending and the status buffer stays displayed, then dies.
 
-Glyphs: 🟣 queued · 🟡 in progress · 🟢 success · 🔴 failure · ⚪ cancelled/skipped · 🟠 action required. A branch with no runs shows nothing.
+Glyphs: 🟣 queued · 🟡 in progress · 🟢 success · 🔴 failure · ⚪ cancelled/skipped · 🟠 action required. A branch with no runs shows nothing, and a failed fetch adds ❗ and the reason: =Checks   ❗ 401 Bad credentials=.
 
 The age is when the run started, counted in magit's own units - the ones the log margin uses. It is as fresh as the line: a status buffer left open says what it said at the last refresh.
+
+** Jobs
+
+While a run is going, each running job gets a line with the step it is on, and each failed job a line with the step that failed:
+
+#+begin_example
+Checks   🟡 Run Tests 6bd5870 - 24 seconds ago
+         🔴 Testing (29.4) - Run tests
+         🟡 Testing (31.1) - Install dependencies
+#+end_example
+
+Failed jobs come first, and past five jobs the last line counts the rest. Succeeded, cancelled and queued jobs stay hidden, so a finished red run keeps only the jobs that broke, and a green run goes back to the single line. =TAB= collapses the job lines; =RET= on one opens that job's page.
 
 ** Forks
 
