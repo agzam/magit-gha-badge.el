@@ -1,3 +1,9 @@
+* 0.7.0
+- =M-x magit-gha-badge-runs-unfold-all= unfolds every job, step, log and group of the runs buffer, and whatever arrives later. In =magit-gha-badge-runs-mode-hook= it has every runs buffer open that way.
+- =magit-gha-badge-runs-unfold-jobs= is gone; the command takes its place.
+- The runs buffer asks for at most eight step logs at a time, and draws twice a second while more wait.
+- =M-x magit-gha-badge-runs-toggle-timestamps= in a buffer of another mode no longer erases that buffer.
+
 * 0.6.0
 - A buffer of the workflow runs: =M-x magit-gha-badge-runs= shows the runs of the branch with their jobs, steps and logs, each a section that folds. A failed job opens at its failed step, and a run in progress is followed: the log of a step appears as the step ends.
 - =RET= on the badge or on a job line opens that buffer. =C-c C-o= opens the page in the browser, as =RET= did.
