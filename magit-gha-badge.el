@@ -394,14 +394,17 @@ that left the machine."
                         (magit-get-upstream-branch branch)
                         (concat "origin/" branch))))
 
-(defun magit-gha-badge--get (resource params callback errorback)
+(defun magit-gha-badge--get (resource params callback errorback &optional reader)
   "GET RESOURCE with PARAMS; CALLBACK gets the payload, ERRORBACK the error.
-A signal from `ghub-request' itself - no token, no `github.user', no
-connection - reaches ERRORBACK from a timer: the caller may be a magit
-refresh, which a signal would abort and a callback must not run inside."
+READER reads a payload that is no JSON.  A signal from `ghub-request'
+itself - no token, no `github.user', no connection - reaches ERRORBACK
+from a timer: a magit refresh must not abort, nor run a callback inside."
   (condition-case err
       (ghub-request "GET" resource params
                     :auth magit-gha-badge-auth
+                    :reader reader
+                    ;; url.el echoes its progress otherwise, at every poll
+                    :silent t
                     :callback (lambda (payload &rest _) (funcall callback payload))
                     :errorback (lambda (err &rest _) (funcall errorback err)))
     (error (run-at-time 0 nil errorback err))))
@@ -621,11 +624,15 @@ The timer dies here unless the callback of the new fetch re-arms it."
 
 ;;;; Section and commands
 
+;; magit-gha-badge-runs.el requires this file, so this file cannot require it
+(autoload 'magit-gha-badge-runs "magit-gha-badge-runs" nil t)
+
 ;; magit resolves a section's keymap from its type by name
 (defvar-keymap magit-gha-badge-section-map
   :doc "Keymap for `gha-badge' sections."
-  "RET" #'magit-gha-badge-browse-run
-  "<mouse-1>" #'magit-gha-badge-browse-run)
+  "RET" #'magit-gha-badge-runs
+  "<mouse-1>" #'magit-gha-badge-runs
+  "C-c C-o" #'magit-gha-badge-browse-run)
 
 ;;;###autoload
 (defun magit-gha-badge-insert ()

@@ -15,7 +15,7 @@ help:
 	@echo "Available commands:"
 	@echo "  make deps           Install dependencies into $(ELPA_DIR)"
 	@echo "  make test           Run unit tests"
-	@echo "  make lint           package-lint the package file"
+	@echo "  make lint           package-lint the package files"
 	@echo "  make check-compile  Check for clean byte-compilation"
 	@echo "  make clean          Remove sandbox and compiled files"
 
@@ -31,20 +31,22 @@ test: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(setq buttercup-stack-frame-style 'omit)" \
 	-l test/magit-gha-badge-tests.el \
+	-l test/magit-gha-badge-runs-tests.el \
 	--funcall buttercup-run
 
 lint: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(require 'package-lint)" \
-	-f package-lint-batch-and-exit magit-gha-badge.el
+	-f package-lint-batch-and-exit magit-gha-badge.el magit-gha-badge-runs.el
 
-# the .elc is dropped again: `load' prefers it over a newer .el, so a
+# the .elc are dropped again: `load' prefers one over a newer .el, so a
 # leftover would have `make test' run yesterday's code
 check-compile: $(ELPA_DIR)
 	$(EMACS_BATCH) --directory . \
 	--eval "(setq byte-compile-error-on-warn t)" \
-	--eval "(unless (byte-compile-file \"magit-gha-badge.el\") (kill-emacs 1))"
-	rm -f magit-gha-badge.elc
+	--eval "(dolist (file '(\"magit-gha-badge.el\" \"magit-gha-badge-runs.el\")) \
+	          (unless (byte-compile-file file) (kill-emacs 1)))"
+	rm -f magit-gha-badge.elc magit-gha-badge-runs.elc
 
 clean:
 	rm -f *.elc test/*.elc

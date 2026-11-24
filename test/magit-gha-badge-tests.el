@@ -838,6 +838,23 @@ inserter records them."
             (expect (length magit-gha-badge-tests--calls) :to-equal 2))
         (remhash repo magit-gha-badge--cache)))))
 
+(describe "magit-gha-badge--get"
+  (it "leaves the payload to ghub's JSON reader unless it is given a reader"
+    (spy-on 'ghub-request)
+    (magit-gha-badge--get "/repos/o/r" nil #'ignore #'ignore)
+    (magit-gha-badge--get "/repos/o/r/actions/jobs/1/logs" nil #'ignore #'ignore
+                          #'buffer-string)
+    (expect (plist-get (nthcdr 3 (spy-calls-args-for 'ghub-request 0)) :reader)
+            :to-be nil)
+    (expect (plist-get (nthcdr 3 (spy-calls-args-for 'ghub-request 1)) :reader)
+            :to-be #'buffer-string))
+
+  (it "keeps url.el from echoing the progress of a request"
+    (spy-on 'ghub-request)
+    (magit-gha-badge--get "/repos/o/r" nil #'ignore #'ignore)
+    (expect (plist-get (nthcdr 3 (spy-calls-args-for 'ghub-request 0)) :silent)
+            :to-be t)))
+
 (describe "a signal from ghub-request"
   (before-each
     (setq magit-gha-badge-tests--calls nil
@@ -990,6 +1007,26 @@ inserter records them."
             (expect (invisible-p (oref section content)) :to-be-truthy)
             (expect (buffer-substring (oref section content) (oref section end))
                     :to-equal "         🟡 Lint - Run linter\n"))
+        (kill-buffer (plist-get state :buffer))))))
+
+(describe "magit-gha-badge-section-map"
+  (it "opens the runs in Emacs on RET or a click, and the page on C-c C-o"
+    (let ((state (magit-gha-badge-tests--render
+                  (list :status "in_progress" :workflow "CI" :sha "0ecbb23deadbeef"
+                        :url "https://github.com/agzam/.emacs.d/actions/runs/123"
+                        :jobs (list (magit-gha-badge-tests--job
+                                     "Lint" "in_progress" nil "Check"))))))
+      (unwind-protect
+          (with-current-buffer (plist-get state :buffer)
+            ;; the badge line, then the job line under it
+            (dolist (line '(0 1))
+              (goto-char (oref (plist-get state :section) start))
+              (forward-line line)
+              (expect (key-binding (kbd "RET")) :to-be #'magit-gha-badge-runs)
+              (expect (key-binding (kbd "<mouse-1>")) :to-be #'magit-gha-badge-runs)
+              (expect (key-binding (kbd "C-c C-o")) :to-be #'magit-gha-badge-browse-run))
+            (expect (get-text-property (point) 'magit-gha-badge-url)
+                    :to-equal "https://github.com/agzam/.emacs.d/actions/runs/123/job/Lint"))
         (kill-buffer (plist-get state :buffer))))))
 
 (describe "magit-gha-badge-browse-run"
