@@ -1,3 +1,10 @@
+* 0.6.0
+- A buffer of the workflow runs: =M-x magit-gha-badge-runs= shows the runs of the branch with their jobs, steps and logs, each a section that folds. A failed job opens at its failed step, and a run in progress is followed: the log of a step appears as the step ends.
+- =RET= on the badge or on a job line opens that buffer. =C-c C-o= opens the page in the browser, as =RET= did.
+- =magit-gha-badge-runs-unfold-jobs= has every job show its steps when the buffer opens.
+- Integrates with [[https://github.com/agzam/remoto.el][remoto.el]], which opens workflow runs in that buffer.
+- Requests no longer echo =Contacting host= in the echo area.
+
 * 0.5.0
 - While a run is going, the badge lists each running job with its current step and each failed job with the step that failed, failed jobs first. A finished red run keeps its failed jobs; a green run goes back to the single line. Past five jobs, four lines and =+N more=.
 - =TAB= collapses the job lines, and =RET= on a job line opens that job's page.
