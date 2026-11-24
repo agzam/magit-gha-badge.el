@@ -48,11 +48,15 @@ A failed job opens at its failed step. A run in progress updates by itself, and 
 
 On a commit in a magit log the command shows that commit's runs. With a prefix argument it reads =OWNER/REPO=, =OWNER/REPO@REF= or the link of a run, so it works for any repository.
 
-Set =magit-gha-badge-runs-unfold-jobs= to have every job show its steps when the buffer opens.
+=M-x magit-gha-badge-runs-unfold-all= unfolds every job, step, log and group of the buffer, and whatever arrives later. It asks GitHub for the log of every step. To have every runs buffer open that way:
+
+#+begin_src emacs-lisp
+(add-hook 'magit-gha-badge-runs-mode-hook #'magit-gha-badge-runs-unfold-all)
+#+end_src
 
 ** remoto.el
 
-[[https://github.com/agzam/remoto.el][remoto.el]] opens GitHub repositories as directories, without cloning them. The two packages integrate: with both installed, remoto.el opens workflow runs in the runs buffer.
+[[https://github.com/agzam/remoto.el][remoto.el]] opens GitHub repositories as directories, without cloning them. With both packages installed, =M-x magit-gha-badge-runs= in a remoto buffer opens the runs of that repository.
 
 ** Forks
 
