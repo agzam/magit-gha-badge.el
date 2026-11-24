@@ -16,10 +16,27 @@
 (defvar magit-gha-badge-runs-tests--answers nil
   "Alist of (REGEXP . ANSWER) that the fake `magit-gha-badge-runs--ask' answers from.
 ANSWER is the value, a function of the endpoint that returns it,
-\(error STATUS MESSAGE) for a failure, or `pending' for no answer at all.")
+\(error STATUS MESSAGE) for a failure, `pending' for no answer at all, or
+`held' for one that comes when the spec releases it.")
 
 (defvar magit-gha-badge-runs-tests--asked nil
   "The endpoints the fake `magit-gha-badge-runs--ask' was asked for, newest first.")
+
+(defvar magit-gha-badge-runs-tests--held nil
+  "The questions whose answer is held: (ENDPOINT CALLBACK ERRBACK) each.")
+
+(defun magit-gha-badge-runs-tests--release (regexp answer)
+  "Answer the held question whose endpoint matches REGEXP with ANSWER.
+ANSWER is the value, or (error STATUS MESSAGE) for a failure."
+  (pcase-let ((`(,_ ,callback ,errback)
+               (seq-find (lambda (held) (string-match-p regexp (car held)))
+                         magit-gha-badge-runs-tests--held)))
+    (setq magit-gha-badge-runs-tests--held
+          (seq-remove (lambda (held) (string-match-p regexp (car held)))
+                      magit-gha-badge-runs-tests--held))
+    (pcase answer
+      (`(error ,status ,message) (funcall errback status message))
+      (_ (funcall callback answer)))))
 
 (defun magit-gha-badge-runs-tests--ask (endpoint callback &optional errback _text)
   "Answer ENDPOINT at once from `magit-gha-badge-runs-tests--answers' to CALLBACK or ERRBACK.
@@ -28,6 +45,7 @@ An endpoint the table lacks fails with status 599, so a spec shows it."
   (pcase (cdr (seq-find (lambda (entry) (string-match-p (car entry) endpoint))
                         magit-gha-badge-runs-tests--answers))
     ('pending nil)
+    ('held (push (list endpoint callback errback) magit-gha-badge-runs-tests--held))
     (`(error ,status ,message) (when errback (funcall errback status message)))
     ('nil (when errback (funcall errback 599 (concat "no fake answer for " endpoint))))
     ((and (pred functionp) answer) (funcall callback (funcall answer endpoint)))
@@ -116,7 +134,8 @@ A spec of a run in progress binds it to a time during that run.")
 TARGET and FOCUS are as `magit-gha-badge-runs' takes them: TARGET is the branch
 main by default, and `newest' stands for no target."
   (setq magit-gha-badge-runs-tests--answers answers
-        magit-gha-badge-runs-tests--asked nil)
+        magit-gha-badge-runs-tests--asked nil
+        magit-gha-badge-runs-tests--held nil)
   (spy-on 'magit-gha-badge-runs--ask :and-call-fake #'magit-gha-badge-runs-tests--ask)
   (spy-on 'magit-gha-badge-runs--now :and-call-fake (lambda () magit-gha-badge-runs-tests--now))
   (setq magit-gha-badge-runs-tests--buffer
@@ -359,34 +378,153 @@ Trailing blanks go, so a heading reads without the space that ends it."
               "Error: Process completed with exit code 2."
               "    ⊘ Lint 0s")))
 
-  (it "unfolds every job at first when asked to, and asks for no log but the failed step's"
-    (let ((magit-gha-badge-runs-unfold-jobs t))
-      (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
-      (expect (seq-take (magit-gha-badge-runs-tests--shown) 7)
-              :to-equal
-              '("o/r  main  3fccf0c"
-                ""
-                "✗ Release 2.9.1  Run Tests #464 1m 57s"
-                "  Triggered via push 8 days ago · agzam pushed 3fccf0c main · Status Failure"
-                "  ✓ integration-tests (29.4) 35s"
-                "    ✓ Set up job 2s"
-                "    ✓ Run integration tests 33s"))
-      (expect (magit-gha-badge-runs-tests--asked "/logs")
-              :to-equal '("repos/o/r/actions/jobs/12/steps/3/logs"))))
+  (it "unfolds every job, step and group on the command, and asks for the log of each step"
+    (magit-gha-badge-runs-tests--open
+     (append (magit-gha-badge-runs-tests--answers)
+             '(("/logs" . "2026-11-15T22:23:00.5Z A line\n"))))
+    (magit-gha-badge-runs-tests--in-buffer
+      (magit-gha-badge-runs-unfold-all)
+      (magit-gha-badge-runs-tests--draw))
+    (expect (magit-gha-badge-runs-tests--shown)
+            :to-equal
+            '("o/r  main  3fccf0c"
+              ""
+              "✗ Release 2.9.1  Run Tests #464 1m 57s"
+              "  Triggered via push 8 days ago · agzam pushed 3fccf0c main · Status Failure"
+              "  ✓ integration-tests (29.4) 35s"
+              "    ✓ Set up job 2s"
+              "A line"
+              "    ✓ Run integration tests 33s"
+              "A line"
+              "  ✗ unit-tests (29.4) 1m 53s"
+              "    ✓ Set up job 2s"
+              "A line"
+              "    ✓ Check out 3s"
+              "A line"
+              "    ✗ Run unit tests 13s"
+              "Run make test"
+              "make test"
+              "shell: /usr/bin/bash -e {0}"
+              "Running 3 specs."
+              "Error: Process completed with exit code 2."
+              "    ⊘ Lint 0s"))
+    (expect (magit-gha-badge-runs-tests--asked "/logs")
+            :to-equal '("repos/o/r/actions/jobs/12/steps/3/logs"
+                        "repos/o/r/actions/jobs/11/steps/1/logs"
+                        "repos/o/r/actions/jobs/11/steps/2/logs"
+                        "repos/o/r/actions/jobs/12/steps/1/logs"
+                        "repos/o/r/actions/jobs/12/steps/2/logs")))
 
-  (it "keeps a job folded that the user folded, where every job is unfolded at first"
-    (let ((magit-gha-badge-runs-unfold-jobs t))
-      (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
+  (it "opens with every section unfolded where the command is in the hook of the mode"
+    (let ((magit-gha-badge-runs-mode-hook (list #'magit-gha-badge-runs-unfold-all)))
+      (magit-gha-badge-runs-tests--open
+       (append (magit-gha-badge-runs-tests--answers)
+               '(("/logs" . "2026-11-15T22:23:00.5Z A line\n")))))
+    (expect (seq-count (lambda (line) (equal line "A line"))
+                       (magit-gha-badge-runs-tests--shown))
+            :to-equal 4)
+    (expect (magit-gha-badge-runs-tests--shown) :to-contain "shell: /usr/bin/bash -e {0}")
+    (magit-gha-badge-runs-tests--in-buffer
+      (expect (buffer-substring-no-properties (point) (pos-eol))
+              :to-equal "Error: Process completed with exit code 2.")))
+
+  (it "keeps a job folded that the user folds once every section is unfolded"
+    (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
+    (magit-gha-badge-runs-tests--in-buffer
+      (magit-gha-badge-runs--commanded)
+      (magit-gha-badge-runs-unfold-all)
+      (magit-gha-badge-runs-tests--draw)
+      (magit-gha-badge-runs-tests--goto "integration-tests")
+      (magit-section-toggle (magit-current-section))
+      (magit-gha-badge-runs--changed)
+      (magit-gha-badge-runs-tests--draw)
+      (expect (magit-gha-badge-runs-tests--shown)
+              :not :to-contain "    ✓ Run integration tests 33s")
+      (expect (magit-gha-badge-runs-tests--shown)
+              :to-contain "    ✓ Check out 3s")))
+
+  (it "unfolds on the command what the user folded before it"
+    (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
+    (magit-gha-badge-runs-tests--in-buffer
+      (magit-gha-badge-runs--commanded)
+      (magit-gha-badge-runs-tests--goto "unit-tests")
+      (magit-section-toggle (magit-current-section))
+      (magit-gha-badge-runs--changed)
+      (magit-gha-badge-runs-tests--draw)
+      (expect (magit-gha-badge-runs-tests--shown) :not :to-contain "    ✓ Check out 3s")
+      (magit-gha-badge-runs-unfold-all)
+      (magit-gha-badge-runs-tests--draw)
+      (expect (magit-gha-badge-runs-tests--shown) :to-contain "    ✓ Check out 3s")))
+
+  (it "asks for 2 logs at a time where that is the limit, the next as each answer comes"
+    (let ((magit-gha-badge-runs--log-limit 2))
+      (magit-gha-badge-runs-tests--open
+       (magit-gha-badge-runs-tests--answers '("/logs" . held)))
       (magit-gha-badge-runs-tests--in-buffer
-        (magit-gha-badge-runs--commanded)
-        (magit-gha-badge-runs-tests--goto "integration-tests")
-        (magit-section-toggle (magit-current-section))
-        (magit-gha-badge-runs--changed)
+        (magit-gha-badge-runs-unfold-all)
         (magit-gha-badge-runs-tests--draw)
-        (expect (magit-gha-badge-runs-tests--shown)
-                :not :to-contain "    ✓ Run integration tests 33s")
-        (expect (magit-gha-badge-runs-tests--shown)
-                :to-contain "    ✓ Check out 3s"))))
+        (expect (magit-gha-badge-runs-tests--asked "/logs")
+                :to-equal '("repos/o/r/actions/jobs/12/steps/3/logs"
+                            "repos/o/r/actions/jobs/11/steps/1/logs"))
+        (expect magit-gha-badge-runs--waiting :to-equal '((11 . 2) (12 . 1) (12 . 2)))
+        (expect (seq-count (lambda (line) (string-match-p "Loading the log…" line))
+                           (magit-gha-badge-runs-tests--shown))
+                :to-equal 5)
+        (magit-gha-badge-runs-tests--release
+         "jobs/11/steps/1/logs" "2026-11-15T22:23:00.5Z Runner ready\n")
+        (magit-gha-badge-runs-tests--draw)
+        (expect (magit-gha-badge-runs-tests--shown) :to-contain "Runner ready")
+        (expect (last (magit-gha-badge-runs-tests--asked "/logs"))
+                :to-equal '("repos/o/r/actions/jobs/11/steps/2/logs"))
+        (magit-gha-badge-runs-tests--release
+         "jobs/12/steps/3/logs" '(error 404 "GitHub answered 404 Not Found"))
+        (magit-gha-badge-runs-tests--draw)
+        (expect (last (magit-gha-badge-runs-tests--asked "/logs"))
+                :to-equal '("repos/o/r/actions/jobs/12/steps/1/logs"))
+        (expect magit-gha-badge-runs--waiting :to-equal '((12 . 2))))))
+
+  (it "draws half a second after a log comes while others wait, and at once when none does"
+    (let ((magit-gha-badge-runs--log-limit 2))
+      (magit-gha-badge-runs-tests--open
+       (magit-gha-badge-runs-tests--answers '("/logs" . held)))
+      (magit-gha-badge-runs-tests--in-buffer
+        (magit-gha-badge-runs-unfold-all)
+        (magit-gha-badge-runs-tests--draw)
+        (spy-on 'run-with-timer :and-call-through)
+        (dolist (log '("jobs/11/steps/1/logs" "jobs/12/steps/3/logs" "jobs/11/steps/2/logs"))
+          (magit-gha-badge-runs-tests--release log "2026-11-15T22:23:00.5Z A line\n")
+          (magit-gha-badge-runs-tests--draw))
+        (expect (mapcar (lambda (call) (seq-take call 3))
+                        (spy-calls-all-args 'run-with-timer))
+                :to-equal '((0.5 nil magit-gha-badge-runs--flush)
+                            (0.5 nil magit-gha-badge-runs--flush)
+                            (0 nil magit-gha-badge-runs--flush))))))
+
+  (it "forgets the logs that wait when it asks GitHub anew"
+    (let ((magit-gha-badge-runs--log-limit 2))
+      (magit-gha-badge-runs-tests--open
+       (magit-gha-badge-runs-tests--answers '("/logs" . held)))
+      (magit-gha-badge-runs-tests--in-buffer
+        (magit-gha-badge-runs-unfold-all)
+        (magit-gha-badge-runs-tests--draw)
+        (revert-buffer)
+        (magit-gha-badge-runs-tests--draw)
+        (expect (last (magit-gha-badge-runs-tests--asked "/logs") 2)
+                :to-equal '("repos/o/r/actions/jobs/11/steps/1/logs"
+                            "repos/o/r/actions/jobs/11/steps/2/logs"))
+        (expect magit-gha-badge-runs--waiting :to-equal '((12 . 1) (12 . 2) (12 . 3))))))
+
+  (it "leaves a buffer of another mode as it is, whichever command of the mode runs there"
+    (with-temp-buffer
+      (insert "not a buffer of runs")
+      (setq magit-section-visibility-cache '((((file . "a")) . hide)))
+      (magit-gha-badge-runs-toggle-timestamps)
+      (magit-gha-badge-runs-unfold-all)
+      ;; No sequence to map: a timer that draws is what must not be there.
+      (while (timerp magit-gha-badge-runs--draw-timer)
+        (magit-gha-badge-runs--flush))
+      (expect (buffer-string) :to-equal "not a buffer of runs")
+      (expect magit-section-visibility-cache :to-equal '((((file . "a")) . hide)))))
 
   (it "asks for the runs of the branch, their jobs, and the log of the failed step only"
     (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
@@ -701,6 +839,19 @@ Each step before it succeeded, each after it waits; 5 has them all over."
       (expect (magit-gha-badge-runs-tests--shown)
               :to-contain "         This step is running. GitHub serves its log once it ends.")
       (expect (magit-gha-badge-runs-tests--asked "/logs") :to-be nil)))
+
+  (it "unfolds the groups of a log that comes once every section is unfolded"
+    (magit-gha-badge-runs-tests--in-buffer
+      (magit-gha-badge-runs--commanded)
+      (magit-gha-badge-runs-unfold-all)
+      (magit-gha-badge-runs-tests--draw)
+      (expect (magit-gha-badge-runs-tests--shown) :to-contain "Checked out")
+      (setq jobs (list (magit-gha-badge-runs-tests--running-job
+                        (magit-gha-badge-runs-tests--steps-at 4))))
+      (magit-gha-badge-runs--poll (current-buffer))
+      (magit-gha-badge-runs-tests--draw)
+      (expect (seq-take (member "Run make test" (magit-gha-badge-runs-tests--shown)) 3)
+              :to-equal '("Run make test" "make test" "shell: /usr/bin/bash -e {0}"))))
 
   (it "renews the durations in place, and keeps the sections whole"
     (magit-gha-badge-runs-tests--in-buffer

@@ -37,13 +37,6 @@ A buffer that no window shows asks six times less often."
   :type 'number
   :group 'magit-gha-badge)
 
-(defcustom magit-gha-badge-runs-unfold-jobs nil
-  "Non-nil means every job is unfolded when a buffer first shows it.
-The steps of the job show; the log of a step still comes when the step
-is unfolded.  By default only a job that failed or is in progress is."
-  :type 'boolean
-  :group 'magit-gha-badge)
-
 (defface magit-gha-badge-runs-success '((t :inherit success))
   "Face of the mark of a run, job or step that succeeded."
   :group 'magit-gha-badge)
@@ -107,7 +100,15 @@ Nil is the newest commit of the repository that has runs.")
 
 (defvar-local magit-gha-badge-runs--logs nil
   "Hash table: (JOB-ID . STEP-NUMBER) -> the parsed lines of its log.
-Or `loading' while it is asked for, or (error . TEXT).")
+Or `loading' while it is asked for, `waiting' before that, or
+\(error . TEXT).")
+
+(defvar-local magit-gha-badge-runs--waiting nil
+  "The keys of the logs that wait to be asked for, the next one first.")
+
+(defvar-local magit-gha-badge-runs--unfold-all nil
+  "Non-nil once `magit-gha-badge-runs-unfold-all' ran in this buffer.
+No section is folded at first then.")
 
 (defvar-local magit-gha-badge-runs--followed nil
   "The (JOB-ID . STEP-NUMBER) of each step that ended while its job was watched.
@@ -572,10 +573,12 @@ that wraps goes on under its text."
 
 (defun magit-gha-badge-runs--insert-block (block)
   "Insert BLOCK of a log: a line, or a group of lines as a section that folds.
-See `magit-gha-badge-runs--blocks'.  A group starts folded, as on GitHub's page."
+See `magit-gha-badge-runs--blocks'.  A group starts folded, as on GitHub's
+page, unless `magit-gha-badge-runs-unfold-all' ran in the buffer."
   (pcase block
     (`(group ,head . ,members)
-     (magit-insert-section (magit-gha-badge-runs-group-section (car head) t)
+     (magit-insert-section (magit-gha-badge-runs-group-section
+                            (car head) (not magit-gha-badge-runs--unfold-all))
        (magit-insert-heading
          (magit-gha-badge-runs--line-text
           (append (seq-take head 3)
@@ -601,6 +604,28 @@ STATUS is the HTTP status of its answer and MESSAGE what came with it."
     (410 "The log has expired")
     (_ message)))
 
+(defconst magit-gha-badge-runs--log-limit 8
+  "The most logs a buffer asks GitHub for at one time.
+The others wait their turn: with every step unfolded, a run of many jobs
+would open hundreds of connections at once.")
+
+(defun magit-gha-badge-runs--fetch-waiting ()
+  "Ask for the logs that wait their turn, as many as the limit has room for."
+  (let* ((asked (seq-count (lambda (log) (eq log 'loading))
+                           (hash-table-values magit-gha-badge-runs--logs)))
+         (room (max 0 (- magit-gha-badge-runs--log-limit asked)))
+         (next (seq-take magit-gha-badge-runs--waiting room)))
+    (setq magit-gha-badge-runs--waiting
+          (seq-drop magit-gha-badge-runs--waiting room))
+    (mapc #'magit-gha-badge-runs--fetch-log next)))
+
+(defun magit-gha-badge-runs--take-log (key log)
+  "Keep LOG as what KEY names, draw it, and ask for the next log that waits.
+LOG is (log . BLOCKS) or (error . TEXT)."
+  (puthash key log magit-gha-badge-runs--logs)
+  (magit-gha-badge-runs--fetch-waiting)
+  (magit-gha-badge-runs--changed))
+
 (defun magit-gha-badge-runs--fetch-log (key)
   "Ask for the log of the step that KEY names, and draw it once it is in.
 KEY is (JOB-ID . STEP-NUMBER)."
@@ -610,26 +635,26 @@ KEY is (JOB-ID . STEP-NUMBER)."
                                    "/steps/" (cdr key) "/logs")
    (magit-gha-badge-runs--guarded
     (lambda (text)
-      (puthash key
-               (cons 'log (magit-gha-badge-runs--blocks
-                           (magit-gha-badge-runs--parse-log text)))
-               magit-gha-badge-runs--logs)
-      (magit-gha-badge-runs--changed)))
+      (magit-gha-badge-runs--take-log
+       key (cons 'log (magit-gha-badge-runs--blocks
+                       (magit-gha-badge-runs--parse-log text))))))
    (magit-gha-badge-runs--guarded
     (lambda (status message)
-      (puthash key (cons 'error (magit-gha-badge-runs--log-failure status message))
-               magit-gha-badge-runs--logs)
-      (magit-gha-badge-runs--changed)))
+      (magit-gha-badge-runs--take-log
+       key (cons 'error (magit-gha-badge-runs--log-failure status message)))))
    t))
 
 (defun magit-gha-badge-runs--log (job step)
   "Return the log of STEP of JOB from this buffer, asked for when it has none.
-That is (log . BLOCKS), `loading', (error . TEXT), or `running' for a
-step in progress, whose log GitHub serves once it ends."
+That is (log . BLOCKS), `loading', `waiting' for its turn, (error . TEXT),
+or `running' for a step in progress, whose log GitHub serves once it ends."
   (let ((key (magit-gha-badge-runs--log-key job step)))
     (cond ((magit-gha-badge-runs--running-p step) 'running)
           ((gethash key magit-gha-badge-runs--logs))
-          (t (magit-gha-badge-runs--fetch-log key)
+          (t (puthash key 'waiting magit-gha-badge-runs--logs)
+             (setq magit-gha-badge-runs--waiting
+                   (append magit-gha-badge-runs--waiting (list key)))
+             (magit-gha-badge-runs--fetch-waiting)
              (gethash key magit-gha-badge-runs--logs)))))
 
 (defun magit-gha-badge-runs--insert-step-body (job step)
@@ -637,7 +662,7 @@ step in progress, whose log GitHub serves once it ends."
   (pcase (magit-gha-badge-runs--log job step)
     ('running (magit-gha-badge-runs--insert-note
                "This step is running. GitHub serves its log once it ends."))
-    ('loading (magit-gha-badge-runs--insert-note "Loading the log…"))
+    ((or 'loading 'waiting) (magit-gha-badge-runs--insert-note "Loading the log…"))
     (`(error . ,text) (magit-gha-badge-runs--insert-note text))
     (`(log . ,blocks)
      (if blocks
@@ -647,8 +672,9 @@ step in progress, whose log GitHub serves once it ends."
 (defun magit-gha-badge-runs--step-hidden-p (job step)
   "Return non-nil when the section of STEP of JOB is folded at first.
 A step that failed starts open, and so does one that ended while its job
-was followed."
-  (not (or (magit-gha-badge-runs--failed-p step)
+was followed.  `magit-gha-badge-runs-unfold-all' has every step start open."
+  (not (or magit-gha-badge-runs--unfold-all
+           (magit-gha-badge-runs--failed-p step)
            (member (magit-gha-badge-runs--log-key job step)
                    magit-gha-badge-runs--followed))))
 
@@ -672,8 +698,8 @@ A step that was skipped or has not started has no body to unfold."
 (defun magit-gha-badge-runs--job-hidden-p (job)
   "Return non-nil when the section of JOB is folded at first.
 A job that failed or runs starts open, and so does the job a link named.
-`magit-gha-badge-runs-unfold-jobs' has every job start open."
-  (not (or magit-gha-badge-runs-unfold-jobs
+`magit-gha-badge-runs-unfold-all' has every job start open."
+  (not (or magit-gha-badge-runs--unfold-all
            (magit-gha-badge-runs--failed-p job)
            (magit-gha-badge-runs--running-p job)
            (equal (alist-get 'id job) magit-gha-badge-runs--focus))))
@@ -802,6 +828,11 @@ step or job that failed."
 (defvar-local magit-gha-badge-runs--draw-timer nil
   "The timer that draws this buffer once what it holds has changed.")
 
+(defconst magit-gha-badge-runs--bulk-delay 0.5
+  "Seconds from a change to its drawing while logs wait their turn.
+A log that comes draws the whole buffer again, and with every section
+unfolded they come by the hundred.")
+
 (defvar magit-gha-badge-runs--drawn nil
   "The root section of the drawing that the one in progress takes the place of.")
 
@@ -838,10 +869,16 @@ once it ends well, though such a job is folded at first."
     (set-buffer-modified-p nil)))
 
 (defun magit-gha-badge-runs--changed ()
-  "Draw this buffer again soon, once for every change of one moment."
-  (unless (timerp magit-gha-badge-runs--draw-timer)
+  "Draw this buffer again soon, once for every change of one moment.
+Only a buffer of runs is drawn: drawing erases the buffer, and a command
+of this mode can be called in a buffer of any other."
+  (when (and (derived-mode-p 'magit-gha-badge-runs-mode)
+             (not (timerp magit-gha-badge-runs--draw-timer)))
     (setq magit-gha-badge-runs--draw-timer
-          (run-with-timer 0 nil #'magit-gha-badge-runs--flush (current-buffer)))))
+          (run-with-timer (if magit-gha-badge-runs--waiting
+                              magit-gha-badge-runs--bulk-delay
+                            0)
+                          nil #'magit-gha-badge-runs--flush (current-buffer)))))
 
 (defun magit-gha-badge-runs--flush (&optional buffer)
   "Draw BUFFER, by default the current one, if it waits to be drawn.
@@ -992,7 +1029,8 @@ A page full of them asks for every run of that commit, unless WHOLE."
 A log that was still asked for, or that failed, is asked for anew."
   (setq magit-gha-badge-runs--generation (1+ magit-gha-badge-runs--generation)
         magit-gha-badge-runs--status 'loading
-        magit-gha-badge-runs--polling nil)
+        magit-gha-badge-runs--polling nil
+        magit-gha-badge-runs--waiting nil)
   (maphash (lambda (key log)
              (unless (eq (car-safe log) 'log)
                (remhash key magit-gha-badge-runs--logs)))
@@ -1180,6 +1218,16 @@ job at that step and line, anything else the Actions page."
   (interactive nil magit-gha-badge-runs-mode)
   (setq magit-gha-badge-runs--timestamps (not magit-gha-badge-runs--timestamps))
   (magit-gha-badge-runs--changed))
+
+(defun magit-gha-badge-runs-unfold-all ()
+  "Unfold every job, step, log and group of this buffer, and each one to come.
+A step that unfolds asks GitHub for its log, so this asks for every log.
+In `magit-gha-badge-runs-mode-hook' it has each buffer of runs open so."
+  (interactive nil magit-gha-badge-runs-mode)
+  (when (derived-mode-p 'magit-gha-badge-runs-mode)
+    (setq magit-gha-badge-runs--unfold-all t
+          magit-section-visibility-cache nil)
+    (magit-gha-badge-runs--changed)))
 
 (defun magit-gha-badge-runs--commanded ()
   "Note a command in this buffer: point is the user's from now on."
