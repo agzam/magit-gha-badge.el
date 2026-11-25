@@ -1,3 +1,7 @@
+* 0.7.1
+- =M-x magit-gha-badge-runs= starts a runs buffer anew when it opens one that already exists, so =magit-gha-badge-runs-mode-hook= runs at every opening. With =magit-gha-badge-runs-unfold-all= in that hook, a buffer that was open before is unfolded again, sections folded by hand included. The logs it holds are kept.
+- A group of log lines that holds an error line starts unfolded, so point lands on the error. A script that fails between =::group::= and =::endgroup::= leaves its error inside the group.
+
 * 0.7.0
 - =M-x magit-gha-badge-runs-unfold-all= unfolds every job, step, log and group of the runs buffer, and whatever arrives later. In =magit-gha-badge-runs-mode-hook= it has every runs buffer open that way.
 - =magit-gha-badge-runs-unfold-jobs= is gone; the command takes its place.
