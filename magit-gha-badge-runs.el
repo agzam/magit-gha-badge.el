@@ -575,14 +575,25 @@ that wraps goes on under its text."
   (insert (magit-gha-badge-runs--line-text (append (seq-take line 3)
                                                    (list (concat (nth 3 line) "\n"))))))
 
+(defun magit-gha-badge-runs--group-hidden-p (members)
+  "Return non-nil when the section of a group of MEMBERS is folded at first.
+MEMBERS are its log lines.  A group starts folded, as on GitHub's page,
+unless it holds an error line, which point goes to.
+`magit-gha-badge-runs-unfold-all' has every group start open."
+  (not (or magit-gha-badge-runs--unfold-all
+           (thread-last members
+                        (mapcar #'cadr)
+                        (memq 'error)))))
+
 (defun magit-gha-badge-runs--insert-block (block)
   "Insert BLOCK of a log: a line, or a group of lines as a section that folds.
-See `magit-gha-badge-runs--blocks'.  A group starts folded, as on GitHub's
-page, unless `magit-gha-badge-runs-unfold-all' ran in the buffer."
+See `magit-gha-badge-runs--blocks', and `magit-gha-badge-runs--group-hidden-p'
+for whether a group starts folded."
   (pcase block
     (`(group ,head . ,members)
      (magit-insert-section (magit-gha-badge-runs-group-section
-                            (car head) (not magit-gha-badge-runs--unfold-all))
+                            (car head)
+                            (magit-gha-badge-runs--group-hidden-p members))
        (magit-insert-heading
          (magit-gha-badge-runs--line-text
           (append (seq-take head 3)

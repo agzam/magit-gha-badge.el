@@ -567,6 +567,25 @@ Trailing blanks go, so a heading reads without the space that ends it."
       (expect (seq-take (member "Run make test" (magit-gha-badge-runs-tests--shown)) 3)
               :to-equal '("Run make test" "make test" "shell: /usr/bin/bash -e {0}"))))
 
+  (it "opens a group that holds an error line, as a script that fails inside one leaves it"
+    (magit-gha-badge-runs-tests--open
+     (magit-gha-badge-runs-tests--answers
+      (cons "actions/jobs/12/steps/3/logs"
+            (concat "\uFEFF2026-11-15T22:23:05.1000000Z ##[group]Run make test\n"
+                    "2026-11-15T22:23:05.2000000Z make test\n"
+                    "2026-11-15T22:23:05.4000000Z ##[endgroup]\n"
+                    "2026-11-15T22:23:06.0000000Z ##[group]Tests\n"
+                    "2026-11-15T22:23:07.0000000Z Running 3 specs.\n"
+                    "2026-11-15T22:23:18.0000000Z ##[error]Process completed with exit code 2.\n"))))
+    (expect (member "Tests" (magit-gha-badge-runs-tests--shown))
+            :to-equal '("Tests" "Running 3 specs." "Error: Process completed with exit code 2."
+                        "    ⊘ Lint 0s"))
+    (expect (magit-gha-badge-runs-tests--shown) :not :to-contain "make test")
+    (magit-gha-badge-runs-tests--in-buffer
+      (expect (buffer-substring-no-properties (point) (pos-eol))
+              :to-equal "Error: Process completed with exit code 2.")
+      (expect (invisible-p (point)) :to-be nil)))
+
   (it "folds on RET at a heading only, by a keymap that the text of a section carries"
     (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
     (magit-gha-badge-runs-tests--in-buffer
