@@ -1222,7 +1222,72 @@ Each step before it succeeded, each after it waits; 5 has them all over."
       (expect (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
               :to-be first)
       (expect (magit-gha-badge-runs-tests--shown)
-              :to-contain "Error: Process completed with exit code 2."))))
+              :to-contain "Error: Process completed with exit code 2.")))
+
+  (it "keeps the logs it has when it opens a buffer again"
+    (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
+    (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
+    (expect (magit-gha-badge-runs-tests--asked "/logs") :to-be nil)
+    (expect (magit-gha-badge-runs-tests--shown)
+            :to-contain "Error: Process completed with exit code 2."))
+
+  (it "runs the hook of the mode each time it opens a buffer, one that exists too"
+    (let* ((times 0)
+           (magit-gha-badge-runs-mode-hook (list (lambda () (setq times (1+ times))))))
+      (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
+      (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
+      (expect times :to-equal 2)))
+
+  (it "unfolds every section of a buffer that was open before the command was in the hook"
+    (let ((answers (append (magit-gha-badge-runs-tests--answers)
+                           '(("/logs" . "2026-11-15T22:23:00.5Z A line\n")))))
+      (magit-gha-badge-runs-tests--open answers)
+      (magit-gha-badge-runs-tests--in-buffer
+        (magit-gha-badge-runs-tests--goto "unit-tests")
+        (magit-section-toggle (magit-current-section)))
+      (expect (magit-gha-badge-runs-tests--shown) :not :to-contain "A line")
+      (expect (magit-gha-badge-runs-tests--shown) :not :to-contain "    ✓ Check out 3s")
+      (let ((magit-gha-badge-runs-mode-hook (list #'magit-gha-badge-runs-unfold-all)))
+        (magit-gha-badge-runs-tests--open answers))
+      (expect (seq-count (lambda (line) (equal line "A line"))
+                         (magit-gha-badge-runs-tests--shown))
+              :to-equal 4)
+      (expect (magit-gha-badge-runs-tests--shown) :to-contain "    ✓ Check out 3s")
+      (expect (magit-gha-badge-runs-tests--shown)
+              :to-contain "shell: /usr/bin/bash -e {0}")))
+
+  (it "cancels the timers of a run in progress when it opens its buffer again"
+    (let* ((run (magit-gha-badge-runs-tests--running-run))
+           (jobs (list (magit-gha-badge-runs-tests--running-job
+                        (magit-gha-badge-runs-tests--steps-at 3))))
+           (answers `(("actions/runs\\?branch=main" . ((workflow_runs . (,run))))
+                      ("actions/runs/464/jobs" . ((jobs . ,jobs)))
+                      ("actions/runs/464\\'" . ,run)))
+           (magit-gha-badge-runs-tests--now
+            (encode-time (iso8601-parse "2026-11-15T22:23:17Z"))))
+      (magit-gha-badge-runs-tests--open answers)
+      (let ((before (magit-gha-badge-runs-tests--in-buffer
+                      (list magit-gha-badge-runs--poll-timer
+                            magit-gha-badge-runs--clock-timer))))
+        (expect (seq-every-p (lambda (timer) (memq timer timer-list)) before) :to-be t)
+        (magit-gha-badge-runs-tests--open answers)
+        (expect (seq-some (lambda (timer) (memq timer timer-list)) before) :to-be nil)
+        (magit-gha-badge-runs-tests--in-buffer
+          (expect (timerp magit-gha-badge-runs--poll-timer) :to-be t)
+          (expect (timerp magit-gha-badge-runs--clock-timer) :to-be t)))))
+
+  (it "drops an answer to a question it asked before it opened the buffer again"
+    (magit-gha-badge-runs-tests--open
+     `(("actions/runs\\?branch=main"
+        . ((workflow_runs . (,(magit-gha-badge-runs-tests--run)))))
+       ("actions/runs/464/jobs" . held)))
+    (let ((held magit-gha-badge-runs-tests--held))
+      (magit-gha-badge-runs-tests--open (magit-gha-badge-runs-tests--answers))
+      (setq magit-gha-badge-runs-tests--held held)
+      (magit-gha-badge-runs-tests--release "runs/464/jobs" '((jobs)))
+      (magit-gha-badge-runs-tests--draw)
+      (expect (magit-gha-badge-runs-tests--shown)
+              :to-contain "  ✗ unit-tests (29.4) 1m 53s"))))
 
 (describe "magit-gha-badge-runs--read"
   (it "takes the buffer at hand when it names a repository"

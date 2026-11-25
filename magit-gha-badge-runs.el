@@ -102,6 +102,8 @@ Nil is the newest commit of the repository that has runs.")
   "Hash table: (JOB-ID . STEP-NUMBER) -> the parsed lines of its log.
 Or `loading' while it is asked for, `waiting' before that, or
 \(error . TEXT).")
+;; A buffer opened again starts its mode anew and keeps the logs it has.
+(put 'magit-gha-badge-runs--logs 'permanent-local t)
 
 (defvar-local magit-gha-badge-runs--waiting nil
   "The keys of the logs that wait to be asked for, the next one first.")
@@ -120,6 +122,8 @@ Its log shows by itself, so a job in progress reads as it goes.")
 (defvar-local magit-gha-badge-runs--generation 0
   "Counts the times this buffer asked for its runs anew.
 An answer to an earlier question is dropped.")
+;; It counts on when the mode starts anew: an earlier answer may still come.
+(put 'magit-gha-badge-runs--generation 'permanent-local t)
 
 (defvar-local magit-gha-badge-runs--timestamps nil
   "Non-nil when each log line shows its time before it.")
@@ -1255,14 +1259,17 @@ at point, \\[revert-buffer] asks GitHub anew.
 \\{magit-gha-badge-runs-mode-map}"
   :group 'magit-gha-badge
   :interactive nil
-  (setq magit-gha-badge-runs--jobs (make-hash-table :test 'equal)
-        magit-gha-badge-runs--logs (make-hash-table :test 'equal))
+  (setq magit-gha-badge-runs--jobs (make-hash-table :test 'equal))
+  (unless magit-gha-badge-runs--logs
+    (setq magit-gha-badge-runs--logs (make-hash-table :test 'equal)))
   (setq-local revert-buffer-function #'magit-gha-badge-runs--revert)
   ;; A redraw has what the user folded and unfolded from this cache alone.
   (setq-local magit-section-cache-visibility t)
   ;; After the visibility that Magit keeps of the sections the user folded.
   (add-hook 'magit-section-set-visibility-hook #'magit-gha-badge-runs--keep-open t t)
   (add-hook 'pre-command-hook #'magit-gha-badge-runs--commanded nil t)
+  ;; `magit-gha-badge-runs' starts the mode anew in a buffer that exists.
+  (add-hook 'change-major-mode-hook #'magit-gha-badge-runs--stop nil t)
   (add-hook 'kill-buffer-hook #'magit-gha-badge-runs--stop nil t))
 
 ;;;; Command
@@ -1414,8 +1421,9 @@ them, a repository by its branch; a prefix argument reads them."
                (buffer (get-buffer-create
                         (magit-gha-badge-runs--buffer-name owner repo target))))
     (with-current-buffer buffer
-      (unless (derived-mode-p 'magit-gha-badge-runs-mode)
-        (magit-gha-badge-runs-mode))
+      ;; Anew in a buffer that exists too: the hook of the mode is where a
+      ;; configuration says how a buffer of runs opens.
+      (magit-gha-badge-runs-mode)
       (setq magit-gha-badge-runs--owner owner
             magit-gha-badge-runs--repo repo
             magit-gha-badge-runs--target target
