@@ -70,11 +70,11 @@ Only runs whose head repo is your fork count, so a branch that shares its name w
 
 ** Install
 
-Not on MELPA (yet). With elpaca:
+Available on [[https://melpa.org/#/magit-gha-badge][MELPA]]:
 
 #+begin_src emacs-lisp
 (use-package magit-gha-badge
-  :ensure (magit-gha-badge :host github :repo "agzam/magit-gha-badge.el")
+  :ensure t
   :defer t
   :init
   (with-eval-after-load 'magit
